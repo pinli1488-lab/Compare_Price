@@ -27,20 +27,44 @@ function tokens(value: string) {
   return new Set(normalize(value).split(/\s+/).filter(Boolean));
 }
 
+const SPEC_LABELS = new Set(['ram', 'rom', 'storage', 'memory', 'dual', 'sim', 'smartphone', 'mobile', 'phone', 'mobiltelefon']);
+const VARIANT_MARKERS = new Set(['pro', 'plus', 'ultra', 'max', 'lite', 'mini']);
+
+function meaningfulTokens(value: string) {
+  return new Set([...tokens(value)].filter((token) => !SPEC_LABELS.has(token)));
+}
+
 export function similarity(left: string, right: string) {
   const a = normalize(left);
   const b = normalize(right);
   if (!a || !b) return 0;
   if (a === b) return 1;
-  const at = tokens(a);
-  const bt = tokens(b);
+  const at = meaningfulTokens(a);
+  const bt = meaningfulTokens(b);
   const intersection = [...at].filter((token) => bt.has(token)).length;
   const union = new Set([...at, ...bt]).size || 1;
   const tokenScore = intersection / union;
+  const queryCoverage = intersection / (at.size || 1);
   const containment = a.includes(b) || b.includes(a) ? Math.min(a.length, b.length) / Math.max(a.length, b.length) : 0;
   const modelTokens = [...at].filter((token) => /\d/.test(token));
   const modelHits = modelTokens.length ? modelTokens.filter((token) => bt.has(token)).length / modelTokens.length : 1;
-  return Math.max(0, Math.min(1, tokenScore * 0.58 + containment * 0.2 + modelHits * 0.22));
+  const leftVariants = [...at].filter((token) => VARIANT_MARKERS.has(token));
+  const rightVariants = [...bt].filter((token) => VARIANT_MARKERS.has(token));
+  const variantMismatch = leftVariants.some((token) => !bt.has(token)) || rightVariants.some((token) => !at.has(token));
+  const score = tokenScore * 0.35 + queryCoverage * 0.3 + containment * 0.1 + modelHits * 0.25;
+  return Math.max(0, Math.min(1, score - (variantMismatch ? 0.25 : 0)));
+}
+
+function searchQueries(value: string) {
+  const queries = [value.trim()];
+  const withoutLabels = value.replace(/\b(?:RAM|ROM|STORAGE|MEMORY)\b/gi, ' ').replace(/\s+/g, ' ').trim();
+  const withoutCapacity = withoutLabels.replace(/\b\d+(?:[.,]\d+)?\s*(?:GB|TB)\b/gi, ' ').replace(/\s+/g, ' ').trim();
+  const withoutGenericWords = withoutCapacity.replace(/\b(?:DUAL\s*SIM|SMARTPHONE|MOBILE\s*PHONE|MOBILTELEFON)\b/gi, ' ').replace(/\s+/g, ' ').trim();
+
+  for (const query of [withoutLabels, withoutCapacity, withoutGenericWords]) {
+    if (query && !queries.some((existing) => normalize(existing) === normalize(query))) queries.push(query);
+  }
+  return queries;
 }
 
 async function remoteFetch(url: string, init: RequestInit = {}) {
@@ -67,23 +91,29 @@ export async function searchProducts(query: string): Promise<Candidate[]> {
       ... on SuggestedProduct { __typename text id category price }
     }
   }`;
-  const response = await remoteFetch(`${BASE_URL}/_internal/bff`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ query: graphQuery, variables: { query: cleanQuery } }),
-  });
-  if (!response.ok) throw new Error(`Prisjakt search returned ${response.status}`);
-  const payload = await response.json() as { data?: { searchSuggestions?: Array<Record<string, unknown>> } };
-  return (payload.data?.searchSuggestions ?? [])
-    .filter((item) => item.__typename === 'SuggestedProduct' && item.id && item.text)
-    .map((item) => ({
-      id: String(item.id),
-      name: String(item.text),
-      url: `${BASE_URL}/produkt.php?p=${item.id}`,
-      previewPrice: item.price == null ? null : Number(item.price),
-      currency: 'SEK',
-      confidence: Math.round(similarity(cleanQuery, String(item.text)) * 100),
-    }))
+  const found = new Map<string, Record<string, unknown>>();
+  for (const searchQuery of searchQueries(cleanQuery)) {
+    const response = await remoteFetch(`${BASE_URL}/_internal/bff`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query: graphQuery, variables: { query: searchQuery } }),
+    });
+    if (!response.ok) throw new Error(`Prisjakt search returned ${response.status}`);
+    const payload = await response.json() as { data?: { searchSuggestions?: Array<Record<string, unknown>> } };
+    for (const item of payload.data?.searchSuggestions ?? []) {
+      if (item.__typename === 'SuggestedProduct' && item.id && item.text) found.set(String(item.id), item);
+    }
+    if (found.size >= 8) break;
+  }
+
+  return [...found.values()].map((item) => ({
+    id: String(item.id),
+    name: String(item.text),
+    url: `${BASE_URL}/produkt.php?p=${item.id}`,
+    previewPrice: item.price == null ? null : Number(item.price),
+    currency: 'SEK',
+    confidence: Math.round(similarity(cleanQuery, String(item.text)) * 100),
+  }))
     .sort((a, b) => b.confidence - a.confidence)
     .slice(0, 8);
 }
