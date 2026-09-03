@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pricedesk-prisjakt",
+  "main": "vinext/server/app-router-entry",
+  "compatibility_date": "2026-09-03",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "dist/client",
+    "binding": "ASSETS"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "pricedesk-prisjakt",
+      "database_id": "58cf1109-7b92-4ca0-9d32-36528f7cefd5"
+    }
+  ]
+}
