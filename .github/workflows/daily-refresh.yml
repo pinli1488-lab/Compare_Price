@@ -1,0 +1,32 @@
+name: Daily Prisjakt refresh
+
+on:
+  schedule:
+    - cron: '0 16 * * *'
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refresh every saved product
+        env:
+          PRICE_DESK_URL: ${{ vars.PRICE_DESK_URL }}
+        run: |
+          node <<'NODE'
+          const base = process.env.PRICE_DESK_URL?.replace(/\/$/, '');
+          if (!base) throw new Error('Set the PRICE_DESK_URL repository variable first.');
+          const response = await fetch(`${base}/api/products`);
+          if (!response.ok) throw new Error(`Product list failed: ${response.status}`);
+          const { products = [] } = await response.json();
+          for (let index = 0; index < products.length; index += 8) {
+            const ids = products.slice(index, index + 8).map((product) => product.id);
+            const refresh = await fetch(`${base}/api/refresh`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ ids }),
+            });
+            if (!refresh.ok) console.error(`Batch ${index / 8 + 1} failed: ${refresh.status}`);
+          }
+          console.log(`Processed ${products.length} products.`);
+          NODE
