@@ -13,10 +13,15 @@ function tokens(value: string) { return new Set(normalize(value).split(/\s+/).fi
 const SPEC_LABELS = new Set(['ram', 'rom', 'storage', 'memory', 'dual', 'sim', 'smartphone', 'mobile', 'phone', 'mobiltelefon']);
 const VARIANT_MARKERS = new Set(['pro', 'plus', 'ultra', 'max', 'lite', 'mini']);
 function meaningfulTokens(value: string) { return new Set([...tokens(value)].filter((token) => !SPEC_LABELS.has(token))); }
+function cleanReferenceTitle(value: string) {
+  return value.replace(/\b(?:Räckvidd|Range|Rekkevidde|Kantama)\s*:\s*\d+(?:[.,]\d+)?\s*km\b.*$/i, '')
+    .replace(/\bMultiple color options available\b/gi, '')
+    .replace(/\s+-\s+Default Title\s*$/i, '').replace(/\s+/g, ' ').trim();
+}
 
 const ACCESSORY_WORDS = new Set(['case', 'cover', 'screen', 'protector', 'film', 'filter', 'kit', 'charger', 'cable', 'adapter', 'sleeve', 'skal', 'fodral', 'kotelo', 'beskyttelse', 'suojakalvo']);
 export function isPlausibleProductMatch(reference: string, candidate: string) {
-  const cleanReference = reference.replace(/^\s*[a-z0-9]{3,}-/i, '');
+  const cleanReference = cleanReferenceTitle(reference).replace(/^\s*[a-z0-9]{3,}-/i, '');
   const source = tokens(cleanReference); const target = tokens(candidate);
   for (const word of ACCESSORY_WORDS) if (target.has(word) && !source.has(word)) return false;
   for (const marker of VARIANT_MARKERS) if (source.has(marker) !== target.has(marker)) return false;
@@ -52,8 +57,9 @@ export function similarity(left: string, right: string) {
 }
 
 function searchQueries(value: string) {
-  const queries = [value.trim()];
-  const noLabels = value.replace(/\b(?:RAM|ROM|STORAGE|MEMORY)\b/gi, ' ').replace(/\s+/g, ' ').trim();
+  const clean = cleanReferenceTitle(value);
+  const queries = [clean];
+  const noLabels = clean.replace(/\b(?:RAM|ROM|STORAGE|MEMORY)\b/gi, ' ').replace(/\s+/g, ' ').trim();
   const noCapacity = noLabels.replace(/\b\d+(?:[.,]\d+)?\s*(?:GB|TB)\b/gi, ' ').replace(/\s+/g, ' ').trim();
   const noGeneric = noCapacity.replace(/\b(?:DUAL\s*SIM|SMARTPHONE|MOBILE\s*PHONE|MOBILTELEFON|5G|4G|EU|GL|ROM)\b/gi, ' ').replace(/\s+/g, ' ').trim();
   for (const query of [noLabels, noCapacity, noGeneric]) if (query && !queries.some((item) => normalize(item) === normalize(query))) queries.push(query);

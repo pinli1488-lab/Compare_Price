@@ -25,7 +25,7 @@ async function refreshCountry(product: NonNullable<Awaited<ReturnType<typeof get
     mistore = candidate ? await fetchMiStoreProduct(candidate.handle, country, product.sku, product.ean) : null;
   }
   if (!mistore) {
-    const marketStillValid = current.matchStatus === 'confirmed' || Boolean(current.marketProductName && isPlausibleProductMatch(product.productName, current.marketProductName));
+    const marketStillValid = current.matchStatus === 'confirmed';
     await upsertCountryPrice(product.id, { ...current, mistoreHandle: null, mistoreName: null, mistoreUrl: null, mistorePriceMinor: null,
       marketProductId: marketStillValid ? current.marketProductId : null,
       marketProductName: marketStillValid ? current.marketProductName : null,
