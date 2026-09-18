@@ -61,7 +61,7 @@ function searchQueries(value: string) {
   const queries = [clean];
   const noLabels = clean.replace(/\b(?:RAM|ROM|STORAGE|MEMORY)\b/gi, ' ').replace(/\s+/g, ' ').trim();
   const noCapacity = noLabels.replace(/\b\d+(?:[.,]\d+)?\s*(?:GB|TB)\b/gi, ' ').replace(/\s+/g, ' ').trim();
-  const noGeneric = noCapacity.replace(/\b(?:DUAL\s*SIM|SMARTPHONE|MOBILE\s*PHONE|MOBILTELEFON|5G|4G|EU|GL|ROM)\b/gi, ' ').replace(/\s+/g, ' ').trim();
+  const noGeneric = noCapacity.replace(/\b(?:DUAL\s*SIM|SMARTPHONE|MOBILE\s*PHONE|MOBILTELEFON|ELECTRIC|5G|4G|EU|GL|ROM)\b/gi, ' ').replace(/\s+/g, ' ').trim();
   for (const query of [noLabels, noCapacity, noGeneric]) if (query && !queries.some((item) => normalize(item) === normalize(query))) queries.push(query);
   return queries;
 }
