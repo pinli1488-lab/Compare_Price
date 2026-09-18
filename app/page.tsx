@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import readXlsxFile from 'read-excel-file';
 import writeXlsxFile from 'write-excel-file';
 
@@ -18,6 +19,7 @@ type Group = { key: string; primary: Product; members: Product[]; variants: Vari
 type MiStoreCandidate = { handle: string; name: string; url: string; priceMinor: number; currency: string; sku: string; ean: string; variantTitle: string; confidence: number };
 type MarketCandidate = { id: string; name: string; url: string; previewPrice: number | null; currency: string; confidence: number };
 type Collection = { handle: string; title: string; productHandles: string[]; updatedAt: string };
+type ActiveVariants = { key: string; variants: Variant[]; left: number; top: number; width: number };
 type Matrix = Array<Array<string | number | boolean | Date | null>>;
 type ApiPayload = { error?: string; products?: Product[]; mistoreCandidates?: MiStoreCandidate[]; marketCandidates?: MarketCandidate[];
   errors?: Array<{ message: string }>; imported?: number; updated?: number; ids?: string[]; touchedIds?: string[]; collections?: Collection[]; collection?: Collection };
@@ -128,6 +130,8 @@ export default function Home() {
   const [matrix, setMatrix] = useState<Matrix>([]); const [hasHeader, setHasHeader] = useState(true);
   const [columns, setColumns] = useState({ sku: -1, name: -1, ean: -1 }); const [pasteText, setPasteText] = useState('');
   const [expectedDraft, setExpectedDraft] = useState<Record<string, string>>({}); const fileRef = useRef<HTMLInputElement>(null);
+  const [activeVariants, setActiveVariants] = useState<ActiveVariants | null>(null);
+  const variantCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadProducts = useCallback(async () => {
     const response = await fetch('/api/products', { cache: 'no-store' }); const data = await response.json() as ApiPayload;
@@ -140,7 +144,20 @@ export default function Home() {
   useEffect(() => { queueMicrotask(() => { void loadProducts().catch((error) => setNotice(String(error))).finally(() => setLoading(false)); }); }, [loadProducts]);
   useEffect(() => { queueMicrotask(() => { void loadCollections().catch((error) => setNotice(String(error))); }); }, [loadCollections]);
   useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(''), 5000); return () => window.clearTimeout(timer); }, [notice]);
-  useEffect(() => { const dismiss = (event: KeyboardEvent) => { if (event.key === 'Escape') { closeImport(); setMatchProduct(null); setExportOpen(false); setCollectionsOpen(false); } }; document.addEventListener('keydown', dismiss); return () => document.removeEventListener('keydown', dismiss); }, []);
+  useEffect(() => { const dismiss = (event: KeyboardEvent) => { if (event.key === 'Escape') { closeImport(); setMatchProduct(null); setExportOpen(false); setCollectionsOpen(false); setActiveVariants(null); } }; document.addEventListener('keydown', dismiss); return () => document.removeEventListener('keydown', dismiss); }, []);
+  useEffect(() => () => { if (variantCloseTimer.current) clearTimeout(variantCloseTimer.current); }, []);
+
+  function cancelVariantClose() { if (variantCloseTimer.current) clearTimeout(variantCloseTimer.current); }
+  function scheduleVariantClose() { cancelVariantClose(); variantCloseTimer.current = setTimeout(() => setActiveVariants(null), 180); }
+  function showVariants(event: React.SyntheticEvent<HTMLElement>, group: Group) {
+    cancelVariantClose();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const width = Math.min(420, window.innerWidth - 32);
+    const height = Math.min(290, 44 + group.variants.length * 44);
+    setActiveVariants({ key: group.key, variants: group.variants,
+      left: Math.max(16, Math.min(rect.right + 10, window.innerWidth - width - 16)),
+      top: Math.max(16, Math.min(rect.top, window.innerHeight - height - 16)), width });
+  }
 
   const groups = useMemo(() => groupProducts(products), [products]);
   const numbers = useMemo(() => new Map(groups.map((group, index) => [group.key, index + 1])), [groups]);
@@ -354,7 +371,7 @@ export default function Home() {
       <div className="toolbar-meta"><span>Manual (Stockholm): {dateLabel(lastManual)}</span><span>Automatic (Stockholm): {dateLabel(lastAuto)}</span></div>
       <div className="pager"><span>{filtered.length ? `${(safePage - 1) * 50 + 1}–${Math.min(safePage * 50, filtered.length)}` : '0'} / {filtered.length}</span><button disabled={safePage <= 1} onClick={() => setPage(safePage - 1)} aria-label="Previous page">‹</button><span>{safePage} / {pageCount}</span><button disabled={safePage >= pageCount} onClick={() => setPage(safePage + 1)} aria-label="Next page">›</button></div>
     </section>
-    <section className="grid-wrap"><table className="price-grid"><thead><tr>
+    <section className="grid-wrap" onScrollCapture={() => setActiveVariants(null)}><table className="price-grid"><colgroup><col style={{ width: 36 }}/><col style={{ width: 235 }}/>{COUNTRIES.flatMap((country) => [<col key={`${country}-own`} style={{ width: 145 }}/>, <col key={`${country}-market`} style={{ width: 145 }}/>, <col key={`${country}-expected`} style={{ width: 145 }}/>])}<col style={{ width: 126 }}/></colgroup><thead><tr>
       <th rowSpan={2} className="check"><input aria-label="Select current page" type="checkbox" checked={allPageSelected} onChange={togglePage}/></th><th rowSpan={2} className="product-head">No. / SKU / Product</th>
       {COUNTRIES.map((country) => <th key={country} colSpan={3} className="country-head">{country} <small>({currency[country]})</small></th>)}<th rowSpan={2} className="action-head">Actions</th>
     </tr><tr>{COUNTRIES.flatMap((country) => [<th key={`${country}-own`}>MiStore Price</th>, <th key={`${country}-market`}>Lowest Price<br/>in Market</th>, <th key={`${country}-expected`}>Expected Price</th>])}</tr></thead><tbody>
@@ -362,7 +379,7 @@ export default function Home() {
         const product = group.primary; const groupIndex = filtered.findIndex((item) => item.key === group.key); const checked = group.members.every((member) => selected.has(member.id));
         return <tr key={group.key}><td className="check"><input type="checkbox" checked={checked} readOnly onClick={(event) => toggleGroup(group, groupIndex, event.shiftKey)} aria-label={`Select product ${numbers.get(group.key)}`}/></td>
           <td className="product-cell"><strong><span className="row-number">{numbers.get(group.key)}.</span> {product.sku || group.variants[0]?.sku || '—'}</strong><span title={product.markets.SE.mistoreName || product.productName}>{product.markets.SE.mistoreName || product.productName}</span>
-            {group.variants.length > 1 ? <span className="variant-trigger" tabIndex={0}>Variants ({group.variants.length})<span className="variant-popover">{group.variants.map((variant, index) => <span key={`${variant.sku}|${variant.ean}|${index}`}>{variant.title || `Variant ${index + 1}`} · SKU {variant.sku || '—'} · EAN {variant.ean || '—'}</span>)}</span></span> : <small>{product.ean || group.variants[0]?.ean || 'No EAN'}</small>}
+            {group.variants.length > 1 ? <button type="button" className="variant-trigger" aria-expanded={activeVariants?.key === group.key} onPointerEnter={(event) => showVariants(event, group)} onPointerLeave={scheduleVariantClose} onFocus={(event) => showVariants(event, group)} onBlur={scheduleVariantClose} onClick={(event) => showVariants(event, group)}>Variants ({group.variants.length})</button> : <small>{product.ean || group.variants[0]?.ean || 'No EAN'}</small>}
           </td>
           {COUNTRIES.flatMap((country) => {
             const market = product.markets[country]; const ownDiff = rangeDifference(group, country, market.lowPriceMinor); const expectedDiff = difference(market.expectedPriceMinor, market.lowPriceMinor); const key = `${product.id}:${country}`;
@@ -376,6 +393,7 @@ export default function Home() {
         </tr>;
       })}
     </tbody></table></section>
+    {activeVariants && createPortal(<div className="variant-popover-floating" role="tooltip" style={{ left: activeVariants.left, top: activeVariants.top, width: activeVariants.width }} onPointerEnter={cancelVariantClose} onPointerLeave={scheduleVariantClose}>{activeVariants.variants.map((variant, index) => <div key={`${variant.sku}|${variant.ean}|${index}`}><strong>{variant.title || `Variant ${index + 1}`}</strong><span>SKU {variant.sku || '—'} · EAN {variant.ean || '—'}</span></div>)}</div>, document.body)}
     {notice && <div className="toast"><span>{notice}</span><button onClick={() => setNotice('')} aria-label="Dismiss notification">×</button></div>}
     {collectionsOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setCollectionsOpen(false); }}><section className="modal collections-modal"><header><div><h2>Selected MiStore collections</h2><p>Add only the collections your team uses. Product membership comes from MiStore.se.</p></div><button className="close" onClick={() => setCollectionsOpen(false)}>Close</button></header>
       <div className="manual-search"><input value={collectionInput} onChange={(event) => setCollectionInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void saveCollection(); }} placeholder="MiStore.se collection URL or handle"/><button className="button primary" onClick={() => void saveCollection()} disabled={collectionSaving}>{collectionSaving ? 'Reading…' : 'Add / refresh'}</button></div>

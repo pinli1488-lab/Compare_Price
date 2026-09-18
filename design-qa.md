@@ -23,6 +23,9 @@
 - Live API returned 24 products after deployment, confirming the prior D1 records remained available.
 - Adding the temporary MiStore `elscootrar` collection populated 20 product handles and narrowed the displayed table from 18 to 2 rows. It was then removed. The live collections API returned an empty list, while all 24 products and 96 country market records remained.
 - Variant popovers are hidden until hover or focus after correcting the selector specificity; the production screenshot showed no overlapping text behind the collection dialog.
+- At a 1440 × 900 viewport, the table has white side gutters. Scrolling to the far right keeps the entire Match / Edit button inside the table and its right gutter.
+- Hovering the first product's Variants control shows all three variants with their color, SKU, and EAN in a viewport-level popup, with no clipping by the sticky product column or scrolling table.
+- The country selector remains a scope control for the Above market and Needs review status filters; all four country columns stay visible.
 
 ## Remaining verification
 
