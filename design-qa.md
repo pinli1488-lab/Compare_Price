@@ -17,14 +17,16 @@
 ## Interaction checks
 
 - The “Above market” filter reduced the displayed set from 18 to 15 rows in the live browser.
-- Selecting one row enabled “Export selected (1)” and both CSV and Excel actions completed without an on-page error.
+- Selecting one row enabled “Export selected (1)”. A real Chromium download produced both files. The Excel file reopened with 2 rows and 36 columns (header plus only the selected product); the CSV had 2 lines and a UTF-8 BOM.
 - An XLSX test file was read in the live browser; SKU, Product Name, and EAN columns were identified correctly, including a text EAN with a leading zero. The test file was not imported.
 - Closing and reopening Import cleared pasted content. Clicking the backdrop closed the dialog.
 - Live API returned 24 products after deployment, confirming the prior D1 records remained available.
+- Adding the temporary MiStore `elscootrar` collection populated 20 product handles and narrowed the displayed table from 18 to 2 rows. It was then removed. The live collections API returned an empty list, while all 24 products and 96 country market records remained.
+- Variant popovers are hidden until hover or focus after correcting the selector specificity; the production screenshot showed no overlapping text behind the collection dialog.
 
 ## Remaining verification
 
-- The browser did not expose a downloaded export artifact for file inspection. Validate the file content with a user-provided failing example if export problems persist.
-- The exact MiStore collection filter awaits the user’s chosen collection URLs or handles.
+- The user has not supplied the specific MiStore collections to retain. The UI now accepts a collection URL or handle and stores only user-selected collections.
+- The user has not supplied an example of the earlier CSV/Excel export failure. Chromium download and structural checks passed for one selected group, including three variants.
 
 final result: passed for the implemented UI and interactions above

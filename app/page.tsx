@@ -17,9 +17,10 @@ type Product = { id: string; sku: string; productName: string; ean: string; crea
 type Group = { key: string; primary: Product; members: Product[]; variants: Variant[] };
 type MiStoreCandidate = { handle: string; name: string; url: string; priceMinor: number; currency: string; sku: string; ean: string; variantTitle: string; confidence: number };
 type MarketCandidate = { id: string; name: string; url: string; previewPrice: number | null; currency: string; confidence: number };
+type Collection = { handle: string; title: string; productHandles: string[]; updatedAt: string };
 type Matrix = Array<Array<string | number | boolean | Date | null>>;
 type ApiPayload = { error?: string; products?: Product[]; mistoreCandidates?: MiStoreCandidate[]; marketCandidates?: MarketCandidate[];
-  errors?: Array<{ message: string }>; imported?: number; updated?: number; ids?: string[]; touchedIds?: string[] };
+  errors?: Array<{ message: string }>; imported?: number; updated?: number; ids?: string[]; touchedIds?: string[]; collections?: Collection[]; collection?: Collection };
 const currency: Record<Country, string> = { SE: 'SEK', DK: 'DKK', FI: 'EUR', NO: 'NOK' };
 const locale: Record<Country, string> = { SE: 'sv-SE', DK: 'da-DK', FI: 'fi-FI', NO: 'nb-NO' };
 const aliases = {
@@ -114,6 +115,8 @@ function groupProducts(products: Product[]): Group[] {
 export default function Home() {
   const [products, setProducts] = useState<Product[]>([]); const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState(''); const [filter, setFilter] = useState('all'); const [filterCountry, setFilterCountry] = useState<Country | 'ALL'>('ALL');
+  const [collections, setCollections] = useState<Collection[]>([]); const [collectionFilter, setCollectionFilter] = useState('ALL');
+  const [collectionsOpen, setCollectionsOpen] = useState(false); const [collectionInput, setCollectionInput] = useState(''); const [collectionSaving, setCollectionSaving] = useState(false);
   const [page, setPage] = useState(1); const [selected, setSelected] = useState<Set<string>>(new Set()); const lastSelectedIndex = useRef<number | null>(null);
   const [refreshing, setRefreshing] = useState(false); const refreshingRef = useRef(false); const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [notice, setNotice] = useState(''); const [exportOpen, setExportOpen] = useState(false); const [importOpen, setImportOpen] = useState(false);
@@ -130,20 +133,29 @@ export default function Home() {
     const response = await fetch('/api/products', { cache: 'no-store' }); const data = await response.json() as ApiPayload;
     if (!response.ok) throw new Error(data.error || 'Could not load products'); setProducts(data.products ?? []);
   }, []);
+  const loadCollections = useCallback(async () => {
+    const response = await fetch('/api/collections', { cache: 'no-store' }); const data = await response.json() as ApiPayload;
+    if (!response.ok) throw new Error(data.error || 'Could not load collections'); setCollections(data.collections ?? []);
+  }, []);
   useEffect(() => { queueMicrotask(() => { void loadProducts().catch((error) => setNotice(String(error))).finally(() => setLoading(false)); }); }, [loadProducts]);
+  useEffect(() => { queueMicrotask(() => { void loadCollections().catch((error) => setNotice(String(error))); }); }, [loadCollections]);
   useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(''), 5000); return () => window.clearTimeout(timer); }, [notice]);
-  useEffect(() => { const dismiss = (event: KeyboardEvent) => { if (event.key === 'Escape') { closeImport(); setMatchProduct(null); setExportOpen(false); } }; document.addEventListener('keydown', dismiss); return () => document.removeEventListener('keydown', dismiss); }, []);
+  useEffect(() => { const dismiss = (event: KeyboardEvent) => { if (event.key === 'Escape') { closeImport(); setMatchProduct(null); setExportOpen(false); setCollectionsOpen(false); } }; document.addEventListener('keydown', dismiss); return () => document.removeEventListener('keydown', dismiss); }, []);
 
   const groups = useMemo(() => groupProducts(products), [products]);
   const numbers = useMemo(() => new Map(groups.map((group, index) => [group.key, index + 1])), [groups]);
   const filtered = useMemo(() => groups.filter((group) => {
     const text = [group.primary.productName, ...group.variants.flatMap((variant) => [variant.sku, variant.ean, variant.title])].join(' ').toLowerCase();
     if (query && !query.toLowerCase().split(/\s+/).every((term) => text.includes(term))) return false;
+    if (collectionFilter !== 'ALL') {
+      const collection = collections.find((item) => item.handle === collectionFilter);
+      if (!collection || !group.members.some((member) => member.markets.SE.mistoreHandle && collection.productHandles.includes(member.markets.SE.mistoreHandle))) return false;
+    }
     const markets = (filterCountry === 'ALL' ? COUNTRIES : [filterCountry]).flatMap((country) => group.members.map((member) => member.markets[country]));
     if (filter === 'above') return markets.some((market) => market.mistorePriceMinor != null && market.lowPriceMinor != null && market.mistorePriceMinor > market.lowPriceMinor);
     if (filter === 'pending') return markets.some((market) => market.mistorePriceMinor == null || market.lowPriceMinor == null || market.matchStatus === 'pending');
     return true;
-  }), [groups, query, filter, filterCountry]);
+  }), [groups, query, filter, filterCountry, collectionFilter, collections]);
   const pageCount = Math.max(1, Math.ceil(filtered.length / 50)); const safePage = Math.min(page, pageCount);
   const pageRows = filtered.slice((safePage - 1) * 50, safePage * 50);
   const selectedGroups = groups.filter((group) => group.members.some((member) => selected.has(member.id)));
@@ -244,6 +256,20 @@ export default function Home() {
     } catch (error) { setNotice(error instanceof Error ? error.message : 'Search failed'); }
     finally { setManualLoading(false); }
   }
+  async function saveCollection(input = collectionInput) {
+    if (!input.trim()) return; setCollectionSaving(true);
+    try {
+      const response = await fetch('/api/collections', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ url: input.trim() }) });
+      const data = await response.json() as ApiPayload; if (!response.ok) throw new Error(data.error || 'Could not add collection');
+      setCollectionInput(''); await loadCollections(); setNotice(`${data.collection?.title || 'Collection'} updated with ${data.collection?.productHandles.length ?? 0} products.`);
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'Could not add collection'); }
+    finally { setCollectionSaving(false); }
+  }
+  async function removeCollection(handle: string) {
+    const response = await fetch('/api/collections', { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ handle }) });
+    if (!response.ok) return setNotice('Could not remove collection');
+    if (collectionFilter === handle) setCollectionFilter('ALL'); await loadCollections();
+  }
   async function addCandidate(candidate: MiStoreCandidate) {
     const response = await fetch('/api/products', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ products: [{ sku: candidate.sku, productName: candidate.name, ean: candidate.ean }] }) });
     const data = await response.json() as ApiPayload; if (!response.ok) return setNotice(data.error || 'Could not add product');
@@ -313,6 +339,7 @@ export default function Home() {
   }
   return <main className="app-shell">
     <header className="topbar"><div className="brand"><span className="brand-mark">P</span><strong>PriceDesk</strong></div><div className="topbar-actions">
+      <button className="button" onClick={() => setCollectionsOpen(true)}>Collections</button>
       <div className="dropdown-wrap"><button className="button" onClick={() => setExportOpen(!exportOpen)} disabled={!selectedGroups.length}>Export selected ({selectedGroups.length})</button>
         {exportOpen && <div className="dropdown"><button onClick={exportExcel}>Excel (.xlsx)</button><button onClick={exportCsv}>CSV (.csv)</button></div>}</div>
       <button className="button primary" onClick={() => setImportOpen(true)}>Import products</button>
@@ -321,6 +348,7 @@ export default function Home() {
       <label className="search-box"><input value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder="Search SKU, product name or EAN" /></label>
       <select aria-label="Price status" value={filter} onChange={(event) => { setFilter(event.target.value); setPage(1); }}><option value="all">All prices</option><option value="above">Above market</option><option value="pending">Needs review</option></select>
       <select aria-label="Country filter" value={filterCountry} onChange={(event) => { setFilterCountry(event.target.value as Country | 'ALL'); setPage(1); }}><option value="ALL">All countries</option>{COUNTRIES.map((country) => <option key={country}>{country}</option>)}</select>
+      <select aria-label="Collection filter" value={collectionFilter} onChange={(event) => { setCollectionFilter(event.target.value); setPage(1); }}><option value="ALL">All collections</option>{collections.map((collection) => <option key={collection.handle} value={collection.handle}>{collection.title}</option>)}</select>
       <button className="button" disabled={refreshing || !selected.size} onClick={() => void refreshIds([...selected])}>{refreshing ? `Refreshing ${progress.done}/${progress.total}` : `Refresh selected (${selectedGroups.length})`}</button>
       {selected.size > 0 && <button className="delete-button" onClick={deleteSelected}>Delete selected</button>}
       <div className="toolbar-meta"><span>Manual (Stockholm): {dateLabel(lastManual)}</span><span>Automatic (Stockholm): {dateLabel(lastAuto)}</span></div>
@@ -349,6 +377,10 @@ export default function Home() {
       })}
     </tbody></table></section>
     {notice && <div className="toast"><span>{notice}</span><button onClick={() => setNotice('')} aria-label="Dismiss notification">×</button></div>}
+    {collectionsOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setCollectionsOpen(false); }}><section className="modal collections-modal"><header><div><h2>Selected MiStore collections</h2><p>Add only the collections your team uses. Product membership comes from MiStore.se.</p></div><button className="close" onClick={() => setCollectionsOpen(false)}>Close</button></header>
+      <div className="manual-search"><input value={collectionInput} onChange={(event) => setCollectionInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void saveCollection(); }} placeholder="MiStore.se collection URL or handle"/><button className="button primary" onClick={() => void saveCollection()} disabled={collectionSaving}>{collectionSaving ? 'Reading…' : 'Add / refresh'}</button></div>
+      <div className="collection-list">{collections.length ? collections.map((collection) => <div key={collection.handle} className="collection-item"><div><strong>{collection.title}</strong><small>{collection.productHandles.length} products · Updated {dateLabel(collection.updatedAt)} Stockholm</small></div><div><button className="button" onClick={() => void saveCollection(collection.handle)} disabled={collectionSaving}>Refresh</button><button className="remove-match" onClick={() => void removeCollection(collection.handle)}>Remove</button></div></div>) : <p className="candidate-empty">No collections selected yet.</p>}</div>
+    </section></div>}
     {importOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeImport(); }}><section className="modal import-modal"><header><div><h2>Import products</h2><p>Search MiStore by SKU, name, EAN, or product URL. Choose the correct product.</p></div><button className="close" onClick={closeImport}>Close</button></header>
       <div className="manual-search"><input value={manualQuery} onChange={(event) => setManualQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void searchManual(); }} placeholder="SKU, name, EAN or MiStore URL"/><button className="button primary" onClick={searchManual} disabled={manualLoading}>{manualLoading ? 'Searching…' : 'Search MiStore'}</button></div>
       {!!manualCandidates.length && <div className="candidate-list">{manualCandidates.map((candidate) => <button key={`${candidate.handle}|${candidate.sku}`} className="candidate" onClick={() => void addCandidate(candidate)}><div><strong>{candidate.name}</strong><small>SKU {candidate.sku || '—'} · EAN {candidate.ean || '—'} · {candidate.variantTitle}</small></div><span>{money(candidate.priceMinor, 'SE')}</span></button>)}</div>}

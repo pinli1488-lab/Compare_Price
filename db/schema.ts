@@ -37,3 +37,17 @@ export const productCountryPrices = sqliteTable('product_country_prices', {
   index('idx_country_prices_updated').on(table.updatedAt),
   index('idx_country_prices_status').on(table.matchStatus),
 ]);
+
+export const productVariants = sqliteTable('product_variants', {
+  productId: text('product_id').notNull(), country: text('country').notNull(), variantsJson: text('variants_json').notNull(),
+}, (table) => [primaryKey({ columns: [table.productId, table.country] })]);
+
+export const priceRefreshLog = sqliteTable('price_refresh_log', {
+  productId: text('product_id').notNull(), country: text('country').notNull(),
+  manualAt: text('manual_at'), autoAt: text('auto_at'),
+}, (table) => [primaryKey({ columns: [table.productId, table.country] })]);
+
+export const selectedCollections = sqliteTable('selected_collections', {
+  handle: text('handle').primaryKey(), title: text('title').notNull(),
+  productHandlesJson: text('product_handles_json').notNull(), updatedAt: text('updated_at').notNull(),
+});

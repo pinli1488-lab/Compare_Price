@@ -31,5 +31,15 @@ jobs:
               if (!refresh.ok || payload.errors?.length) console.error(`Product ${index + 1} ${countries[countryIndex]} failed: ${JSON.stringify(payload.errors ?? refresh.status)}`);
             }
           }
+          const selected = await fetch(`${base}/api/collections`);
+          if (!selected.ok) throw new Error(`Collection list failed: ${selected.status}`);
+          const { collections = [] } = await selected.json();
+          for (const collection of collections) {
+            const response = await fetch(`${base}/api/collections`, {
+              method: 'POST', headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ handle: collection.handle }),
+            });
+            if (!response.ok) console.error(`Collection ${collection.handle} failed: ${await response.text()}`);
+          }
           console.log(`Processed ${products.length} products.`);
           NODE

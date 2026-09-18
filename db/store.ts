@@ -46,6 +46,10 @@ export async function ensureSchema() {
       product_id TEXT NOT NULL, country TEXT NOT NULL, manual_at TEXT, auto_at TEXT,
       PRIMARY KEY (product_id, country)
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS selected_collections (
+      handle TEXT PRIMARY KEY, title TEXT NOT NULL, product_handles_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )`),
     db.prepare(`INSERT OR IGNORE INTO product_country_prices (
       product_id,country,currency,market_product_id,market_product_name,market_product_url,
       match_confidence,match_status

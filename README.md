@@ -7,6 +7,7 @@ PriceDesk is a shared, password-free internal web tool for comparing your own pr
 - Imports `.xlsx` and `.csv` files or pasted spreadsheet rows.
 - Maps SKU, product name and EAN columns, then reads each country's current MiStore price automatically.
 - Matches products independently across Sweden, Denmark, Finland and Norway, with manual confirmation for both MiStore and Prisjakt.
+- Tracks only MiStore.se collections selected by the team and refreshes their product membership daily.
 - Excludes MiStore, Refurbed and used or refurbished offers from market results.
 - Shows each country's linked MiStore price, linked lowest market price, merchant, editable expected price and both differences.
 - Exports selected products to Excel or CSV.
