@@ -4,252 +4,360 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import readXlsxFile from 'read-excel-file';
 import writeXlsxFile from 'write-excel-file';
 
-type Product = {
-  id: string; sku: string; productName: string; ean: string; ownPriceOre: number; currency: string;
-  matchedProductId: string | null; matchedProductName: string | null; matchedProductUrl: string | null;
-  matchConfidence: number | null; matchStatus: 'pending' | 'auto' | 'confirmed' | 'not_found';
-  lowPriceOre: number | null; lowMerchant: string | null; lowUrl: string | null;
-  highPriceOre: number | null; highMerchant: string | null; highUrl: string | null;
-  updatedAt: string | null; createdAt: string;
+const COUNTRIES = ['SE', 'DK', 'FI', 'NO'] as const;
+type Country = typeof COUNTRIES[number];
+type Variant = { sku: string; ean: string; title: string; priceMinor: number };
+type Market = {
+  currency: string; mistoreHandle: string | null; mistoreName: string | null; mistoreUrl: string | null;
+  mistorePriceMinor: number | null; marketProductId: string | null; marketProductName: string | null;
+  marketProductUrl: string | null; matchStatus: string; lowPriceMinor: number | null; lowMerchant: string | null;
+  expectedPriceMinor: number | null; updatedAt: string | null; manualRefreshedAt: string | null; autoRefreshedAt: string | null;
 };
-
-type Candidate = { id: string; name: string; url: string; previewPrice: number | null; currency: string; confidence: number };
+type Product = { id: string; sku: string; productName: string; ean: string; createdAt: string; markets: Record<Country, Market>; variants: Record<Country, Variant[]> };
+type Group = { key: string; primary: Product; members: Product[]; variants: Variant[] };
+type MiStoreCandidate = { handle: string; name: string; url: string; priceMinor: number; currency: string; sku: string; ean: string; variantTitle: string; confidence: number };
+type MarketCandidate = { id: string; name: string; url: string; previewPrice: number | null; currency: string; confidence: number };
 type Matrix = Array<Array<string | number | boolean | Date | null>>;
-type ColumnMap = { sku: number; name: number; ean: number; price: number };
-type Filter = 'all' | 'above' | 'below' | 'pending';
-
-const headerAliases = {
-  sku: ['sku', 'artikelnummer', 'item number', 'product id', '产品编号'],
+type ApiPayload = { error?: string; products?: Product[]; mistoreCandidates?: MiStoreCandidate[]; marketCandidates?: MarketCandidate[];
+  errors?: Array<{ message: string }>; imported?: number; updated?: number; ids?: string[]; touchedIds?: string[] };
+const currency: Record<Country, string> = { SE: 'SEK', DK: 'DKK', FI: 'EUR', NO: 'NOK' };
+const locale: Record<Country, string> = { SE: 'sv-SE', DK: 'da-DK', FI: 'fi-FI', NO: 'nb-NO' };
+const aliases = {
+  sku: ['sku', 'artikelnummer', 'item number', 'product id', 'product code', '产品编号'],
   name: ['product name', 'title', 'produktnamn', 'product', 'name', '产品名称', '商品名称'],
   ean: ['ean', 'gtin', 'barcode', '条码'],
-  price: ['our price', 'own price', 'sale price', 'price', 'pris', '我们的价格', '我方价格', '售价'],
 };
-
 function normalizeHeader(value: unknown) { return String(value ?? '').trim().toLowerCase().replace(/[_-]+/g, ' '); }
-function guessColumn(headers: unknown[], aliases: string[], fallback = -1) {
+function columnIndex(headers: unknown[], names: string[], fallback = -1) {
   const normalized = headers.map(normalizeHeader);
-  const exact = normalized.findIndex((header) => aliases.includes(header));
-  if (exact >= 0) return exact;
-  const partial = normalized.findIndex((header) => aliases.some((alias) => header.includes(alias)));
-  return partial >= 0 ? partial : fallback;
+  const exact = normalized.findIndex((name) => names.includes(name));
+  return exact >= 0 ? exact : normalized.findIndex((name) => names.some((alias) => name.includes(alias))) >= 0
+    ? normalized.findIndex((name) => names.some((alias) => name.includes(alias))) : fallback;
 }
-function parsePrice(value: unknown) {
-  if (typeof value === 'number') return value;
-  let text = String(value ?? '').trim().replace(/\s/g, '').replace(/[^\d,.-]/g, '');
-  if (text.includes(',') && text.includes('.')) text = text.lastIndexOf(',') > text.lastIndexOf('.') ? text.replace(/\./g, '').replace(',', '.') : text.replace(/,/g, '');
-  else if (text.includes(',')) text = /,\d{1,2}$/.test(text) ? text.replace(',', '.') : text.replace(/,/g, '');
-  return Number(text);
-}
-function parseCsv(text: string): Matrix {
+function parseDelimited(text: string): Matrix {
+  const first = text.split(/\r?\n/, 1)[0] ?? '';
+  const delimiter = ['\t', ';', ','].sort((a, b) => first.split(b).length - first.split(a).length)[0];
   const rows: Matrix = []; let row: Matrix[number] = []; let cell = ''; let quoted = false;
   for (let i = 0; i < text.length; i += 1) {
     const char = text[i];
     if (char === '"' && quoted && text[i + 1] === '"') { cell += '"'; i += 1; }
     else if (char === '"') quoted = !quoted;
-    else if ((char === ',' || char === ';') && !quoted) { row.push(cell); cell = ''; }
+    else if (char === delimiter && !quoted) { row.push(cell); cell = ''; }
     else if ((char === '\n' || char === '\r') && !quoted) {
       if (char === '\r' && text[i + 1] === '\n') i += 1;
-      row.push(cell); if (row.some((value) => String(value).trim())) rows.push(row); row = []; cell = '';
+      row.push(cell); if (row.some((value) => String(value ?? '').trim())) rows.push(row);
+      row = []; cell = '';
     } else cell += char;
   }
-  row.push(cell); if (row.some((value) => String(value).trim())) rows.push(row);
+  row.push(cell); if (row.some((value) => String(value ?? '').trim())) rows.push(row);
   return rows;
 }
-function csvEscape(value: unknown) { const text = String(value ?? ''); return /[",\n;]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text; }
-function formatMoney(ore: number | null, currency = 'SEK') {
-  if (ore == null) return '—';
-  return new Intl.NumberFormat('sv-SE', { style: 'currency', currency, maximumFractionDigits: ore % 100 ? 2 : 0 }).format(ore / 100);
+function parsePrice(value: string) {
+  let clean = value.trim().replace(/\s/g, '').replace(/[^\d,.-]/g, '');
+  if (clean.includes(',') && clean.includes('.')) clean = clean.lastIndexOf(',') > clean.lastIndexOf('.') ? clean.replace(/\./g, '').replace(',', '.') : clean.replace(/,/g, '');
+  else if (clean.includes(',')) clean = /,\d{1,2}$/.test(clean) ? clean.replace(',', '.') : clean.replace(/,/g, '');
+  return Number(clean);
 }
-function percentDifference(own: number, market: number | null) { return market ? ((own - market) / market) * 100 : null; }
-function formatDifference(own: number, market: number | null) { if (market == null) return '—'; const value = own - market; return `${value > 0 ? '+' : value < 0 ? '−' : ''}${formatMoney(Math.abs(value))}`; }
-function localDate(iso: string | null) { return iso ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(iso)) : '尚未更新'; }
+function money(minor: number | null, country: Country) {
+  if (minor == null) return '—';
+  return new Intl.NumberFormat(locale[country], { style: 'currency', currency: currency[country], maximumFractionDigits: minor % 100 ? 2 : 0 }).format(minor / 100);
+}
+function priceRange(group: Group, country: Country) {
+  const values = ownPriceValues(group, country);
+  if (!values.length) return '—';
+  const low = Math.min(...values); const high = Math.max(...values);
+  return low === high ? money(low, country) : `${money(low, country)} – ${money(high, country)}`;
+}
+function ownPriceValues(group: Group, country: Country) {
+  return group.members.flatMap((member) => [member.markets[country].mistorePriceMinor, ...(member.variants?.[country] ?? []).map((variant) => variant.priceMinor)]).filter((value): value is number => value != null);
+}
+function rangeDifference(group: Group, country: Country, marketLow: number | null) {
+  const values = ownPriceValues(group, country);
+  if (!values.length || marketLow == null) return null;
+  const low = difference(Math.min(...values), marketLow); const high = difference(Math.max(...values), marketLow);
+  if (!low || !high) return null;
+  return { label: low.label === high.label ? low.label : `${low.label} – ${high.label}`, percentage: high.percentage };
+}
+function difference(own: number | null, market: number | null) {
+  if (own == null || market == null || market <= 0) return null;
+  const percentage = (own - market) / market * 100;
+  return { percentage, label: `${percentage > 0 ? '+' : ''}${percentage.toFixed(1)}%` };
+}
+function dateLabel(value: string | null) {
+  if (!value) return 'Never';
+  return new Intl.DateTimeFormat('en-GB', { dateStyle: 'short', timeStyle: 'short', timeZone: 'Europe/Stockholm' }).format(new Date(value));
+}
+function escapeCsv(value: unknown) {
+  const string = String(value ?? '');
+  return /[",\n\r;]/.test(string) ? `"${string.replace(/"/g, '""')}"` : string;
+}
+function groupProducts(products: Product[]): Group[] {
+  const groups = new Map<string, Group>();
+  for (const product of products) {
+    const match = COUNTRIES.map((country) => product.markets[country].mistoreHandle ? `${country}:${product.markets[country].mistoreHandle}` : '').find(Boolean);
+    const key = match ? `mistore:${match}` : `product:${product.id}`;
+    const existing = groups.get(key);
+    if (existing) existing.members.push(product);
+    else groups.set(key, { key, primary: product, members: [product], variants: [] });
+  }
+  for (const group of groups.values()) {
+    const variants = new Map<string, Variant>();
+    for (const member of group.members) {
+      if (member.sku || member.ean) variants.set(`${member.sku}|${member.ean}`, { sku: member.sku, ean: member.ean, title: '', priceMinor: member.markets.SE.mistorePriceMinor ?? 0 });
+      for (const variant of member.variants?.SE ?? []) variants.set(`${variant.sku}|${variant.ean}`, variant);
+    }
+    group.variants = [...variants.values()];
+  }
+  return [...groups.values()];
+}
 
 export default function Home() {
-  const [products, setProducts] = useState<Product[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [query, setQuery] = useState('');
-  const [filter, setFilter] = useState<Filter>('all');
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [importOpen, setImportOpen] = useState(false);
-  const [exportOpen, setExportOpen] = useState(false);
-  const [matrix, setMatrix] = useState<Matrix>([]);
-  const [columnMap, setColumnMap] = useState<ColumnMap>({ sku: -1, name: -1, ean: -1, price: -1 });
-  const [pasteText, setPasteText] = useState('');
-  const [manual, setManual] = useState({ sku: '', name: '', ean: '', price: '' });
-  const [notice, setNotice] = useState('');
-  const [refreshing, setRefreshing] = useState(false);
-  const [progress, setProgress] = useState({ done: 0, total: 0 });
-  const [matchProduct, setMatchProduct] = useState<Product | null>(null);
-  const [candidates, setCandidates] = useState<Candidate[]>([]);
-  const [candidateLoading, setCandidateLoading] = useState(false);
-  const [clockTick, setClockTick] = useState(0);
-  const fileRef = useRef<HTMLInputElement>(null);
+  const [products, setProducts] = useState<Product[]>([]); const [loading, setLoading] = useState(true);
+  const [query, setQuery] = useState(''); const [filter, setFilter] = useState('all'); const [filterCountry, setFilterCountry] = useState<Country | 'ALL'>('ALL');
+  const [page, setPage] = useState(1); const [selected, setSelected] = useState<Set<string>>(new Set()); const lastSelectedIndex = useRef<number | null>(null);
+  const [refreshing, setRefreshing] = useState(false); const refreshingRef = useRef(false); const [progress, setProgress] = useState({ done: 0, total: 0 });
+  const [notice, setNotice] = useState(''); const [exportOpen, setExportOpen] = useState(false); const [importOpen, setImportOpen] = useState(false);
+  const [matchProduct, setMatchProduct] = useState<Product | null>(null); const [matchCountry, setMatchCountry] = useState<Country>('SE');
+  const [mistoreQuery, setMistoreQuery] = useState(''); const [marketQuery, setMarketQuery] = useState('');
+  const [mistoreCandidates, setMistoreCandidates] = useState<MiStoreCandidate[]>([]); const [marketCandidates, setMarketCandidates] = useState<MarketCandidate[]>([]);
+  const [mistoreLoading, setMistoreLoading] = useState(false); const [marketLoading, setMarketLoading] = useState(false);
+  const [manualQuery, setManualQuery] = useState(''); const [manualCandidates, setManualCandidates] = useState<MiStoreCandidate[]>([]); const [manualLoading, setManualLoading] = useState(false);
+  const [matrix, setMatrix] = useState<Matrix>([]); const [hasHeader, setHasHeader] = useState(true);
+  const [columns, setColumns] = useState({ sku: -1, name: -1, ean: -1 }); const [pasteText, setPasteText] = useState('');
+  const [expectedDraft, setExpectedDraft] = useState<Record<string, string>>({}); const fileRef = useRef<HTMLInputElement>(null);
 
   const loadProducts = useCallback(async () => {
-    const response = await fetch('/api/products', { cache: 'no-store' });
-    const data = await response.json() as { products?: Product[]; error?: string };
-    if (!response.ok) throw new Error(data.error || '读取产品失败');
-    setProducts(data.products ?? []);
+    const response = await fetch('/api/products', { cache: 'no-store' }); const data = await response.json() as ApiPayload;
+    if (!response.ok) throw new Error(data.error || 'Could not load products'); setProducts(data.products ?? []);
   }, []);
+  useEffect(() => { queueMicrotask(() => { void loadProducts().catch((error) => setNotice(String(error))).finally(() => setLoading(false)); }); }, [loadProducts]);
+  useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(''), 5000); return () => window.clearTimeout(timer); }, [notice]);
+  useEffect(() => { const dismiss = (event: KeyboardEvent) => { if (event.key === 'Escape') { closeImport(); setMatchProduct(null); setExportOpen(false); } }; document.addEventListener('keydown', dismiss); return () => document.removeEventListener('keydown', dismiss); }, []);
 
-  useEffect(() => { queueMicrotask(() => loadProducts().catch((error) => setNotice(error.message)).finally(() => setLoading(false))); }, [loadProducts]);
-  useEffect(() => { const timer = window.setInterval(() => setClockTick((value) => value + 1), 60_000); return () => window.clearInterval(timer); }, []);
-
-  const counts = useMemo(() => ({
-    all: products.length,
-    matched: products.filter((p) => p.lowPriceOre != null).length,
-    above: products.filter((p) => p.lowPriceOre != null && p.ownPriceOre > p.lowPriceOre).length,
-    below: products.filter((p) => p.lowPriceOre != null && p.ownPriceOre <= p.lowPriceOre).length,
-    pending: products.filter((p) => p.matchStatus === 'pending' || p.matchStatus === 'not_found').length,
-  }), [products]);
-
-  const visibleProducts = useMemo(() => products.filter((product) => {
-    const search = query.trim().toLowerCase();
-    const matchesSearch = !search || `${product.sku} ${product.ean} ${product.productName} ${product.matchedProductName ?? ''}`.toLowerCase().includes(search);
-    if (!matchesSearch) return false;
-    if (filter === 'above') return product.lowPriceOre != null && product.ownPriceOre > product.lowPriceOre;
-    if (filter === 'below') return product.lowPriceOre != null && product.ownPriceOre <= product.lowPriceOre;
-    if (filter === 'pending') return product.matchStatus === 'pending' || product.matchStatus === 'not_found';
+  const groups = useMemo(() => groupProducts(products), [products]);
+  const numbers = useMemo(() => new Map(groups.map((group, index) => [group.key, index + 1])), [groups]);
+  const filtered = useMemo(() => groups.filter((group) => {
+    const text = [group.primary.productName, ...group.variants.flatMap((variant) => [variant.sku, variant.ean, variant.title])].join(' ').toLowerCase();
+    if (query && !query.toLowerCase().split(/\s+/).every((term) => text.includes(term))) return false;
+    const markets = (filterCountry === 'ALL' ? COUNTRIES : [filterCountry]).flatMap((country) => group.members.map((member) => member.markets[country]));
+    if (filter === 'above') return markets.some((market) => market.mistorePriceMinor != null && market.lowPriceMinor != null && market.mistorePriceMinor > market.lowPriceMinor);
+    if (filter === 'pending') return markets.some((market) => market.mistorePriceMinor == null || market.lowPriceMinor == null || market.matchStatus === 'pending');
     return true;
-  }), [products, query, filter]);
+  }), [groups, query, filter, filterCountry]);
+  const pageCount = Math.max(1, Math.ceil(filtered.length / 50)); const safePage = Math.min(page, pageCount);
+  const pageRows = filtered.slice((safePage - 1) * 50, safePage * 50);
+  const selectedGroups = groups.filter((group) => group.members.some((member) => selected.has(member.id)));
+  const allPageSelected = pageRows.length > 0 && pageRows.every((group) => group.members.every((member) => selected.has(member.id)));
+  const refreshed = products.flatMap((product) => COUNTRIES.map((country) => product.markets[country]));
+  const lastManual = refreshed.map((market) => market.manualRefreshedAt).filter((value): value is string => Boolean(value)).sort().at(-1) ?? null;
+  const lastAuto = refreshed.map((market) => market.autoRefreshedAt).filter((value): value is string => Boolean(value)).sort().at(-1) ?? null;
+  const activeMatch = matchProduct ? products.find((product) => product.id === matchProduct.id) ?? matchProduct : null;
 
+  function closeImport() { setImportOpen(false); setManualQuery(''); setManualCandidates([]); setMatrix([]); setPasteText(''); if (fileRef.current) fileRef.current.value = ''; }
+  function toggleGroup(group: Group, index: number, shift: boolean) {
+    const next = new Set(selected); const target = group.members.every((member) => selected.has(member.id)) ? false : true;
+    const start = shift && lastSelectedIndex.current != null ? Math.min(index, lastSelectedIndex.current) : index;
+    const end = shift && lastSelectedIndex.current != null ? Math.max(index, lastSelectedIndex.current) : index;
+    for (let i = start; i <= end; i += 1) for (const member of filtered[i].members) {
+      if (target) next.add(member.id); else next.delete(member.id);
+    }
+    setSelected(next); lastSelectedIndex.current = index;
+  }
+  function togglePage() {
+    const next = new Set(selected); for (const group of pageRows) for (const member of group.members) {
+      if (allPageSelected) next.delete(member.id); else next.add(member.id);
+    } setSelected(next);
+  }
+  const refreshIds = useCallback(async (ids: string[], countries: readonly Country[] = COUNTRIES, quiet = false) => {
+    const unique = [...new Set(ids)]; if (!unique.length || refreshingRef.current) return;
+    refreshingRef.current = true; setRefreshing(true); setProgress({ done: 0, total: unique.length }); let errors = 0;
+    try {
+      for (const [index, id] of unique.entries()) {
+        const counts = await Promise.all(countries.map(async (country) => {
+          try {
+            const response = await fetch('/api/refresh', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: [id], country, source: 'manual' }) });
+            const data = await response.json() as ApiPayload; return data.errors?.length ?? (response.ok ? 0 : 1);
+          } catch { return 1; }
+        }));
+        errors += counts.reduce((sum, value) => sum + value, 0); setProgress({ done: index + 1, total: unique.length });
+      }
+      await loadProducts();
+      if (!quiet) setNotice(errors ? `Refresh finished. ${errors} country matches need review.` : `Updated ${unique.length} products.`);
+    } finally { refreshingRef.current = false; setRefreshing(false); }
+  }, [loadProducts]);
+  async function saveExpected(product: Product, country: Country) {
+    const key = `${product.id}:${country}`; if (!(key in expectedDraft)) return;
+    const input = expectedDraft[key]; const parsed = parsePrice(input);
+    if (input.trim() && (!Number.isFinite(parsed) || parsed < 0)) return setNotice('Enter a valid expected price.');
+    const response = await fetch('/api/products', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: product.id, country, expectedPriceMinor: input.trim() ? Math.round(parsed * 100) : null }) });
+    if (!response.ok) return setNotice('Could not save expected price.');
+    setExpectedDraft((draft) => { const next = { ...draft }; delete next[key]; return next; }); await loadProducts();
+  }
+  async function lookup(source: 'mistore' | 'market', country: Country, value: string) {
+    if (!value.trim()) return;
+    const setLoading = source === 'mistore' ? setMistoreLoading : setMarketLoading;
+    setLoading(true);
+    try {
+      const response = await fetch(`/api/search?source=${source}&country=${country}&q=${encodeURIComponent(value.trim())}`);
+      const data = await response.json() as ApiPayload; if (!response.ok) throw new Error(data.error || 'Search failed');
+      if (source === 'mistore') setMistoreCandidates(data.mistoreCandidates ?? []);
+      else setMarketCandidates(data.marketCandidates ?? []);
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'Search failed'); }
+    finally { setLoading(false); }
+  }
+  function openMatch(product: Product) {
+    setMatchProduct(product); setMatchCountry('SE');
+    const own = product.sku || product.ean || product.productName; const market = product.markets.SE.mistoreName || product.productName;
+    setMistoreQuery(own); setMarketQuery(market); setMistoreCandidates([]); setMarketCandidates([]);
+    void lookup('mistore', 'SE', own); void lookup('market', 'SE', market);
+  }
+  function changeCountry(country: Country) {
+    if (!activeMatch) return; setMatchCountry(country);
+    const own = activeMatch.sku || activeMatch.ean || activeMatch.productName; const market = activeMatch.markets[country].mistoreName || activeMatch.productName;
+    setMistoreQuery(own); setMarketQuery(market); setMistoreCandidates([]); setMarketCandidates([]);
+    void lookup('mistore', country, own); void lookup('market', country, market);
+  }
+  async function chooseMiStore(candidate: MiStoreCandidate) {
+    if (!activeMatch) return;
+    const response = await fetch('/api/match', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: activeMatch.id, country: matchCountry, source: 'mistore', handle: candidate.handle, sku: candidate.sku, ean: candidate.ean }) });
+    const data = await response.json() as ApiPayload; if (!response.ok) return setNotice(data.error || 'MiStore match failed');
+    await loadProducts(); setNotice(`${matchCountry} MiStore product updated.`);
+  }
+  async function chooseMarket(candidate: MarketCandidate) {
+    if (!activeMatch) return;
+    const response = await fetch('/api/match', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: activeMatch.id, country: matchCountry, source: 'market', productId: candidate.id, productName: candidate.name, productUrl: candidate.url }) });
+    const data = await response.json() as ApiPayload; if (!response.ok) return setNotice(data.error || 'Prisjakt match failed');
+    await loadProducts(); setNotice(`${matchCountry} Prisjakt product updated.`);
+  }
+  async function removeMatch(source: 'mistore' | 'market') {
+    if (!activeMatch) return;
+    const response = await fetch('/api/match', { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: activeMatch.id, country: matchCountry, source }) });
+    if (!response.ok) return setNotice('Could not remove this match.');
+    await loadProducts(); setNotice(`${matchCountry} ${source === 'market' ? 'Prisjakt' : 'MiStore'} match removed.`);
+  }
+  async function searchManual() {
+    if (!manualQuery.trim()) return; setManualLoading(true);
+    try {
+      const response = await fetch(`/api/search?source=mistore&country=SE&q=${encodeURIComponent(manualQuery)}`);
+      const data = await response.json() as ApiPayload; if (!response.ok) throw new Error(data.error || 'Search failed'); setManualCandidates(data.mistoreCandidates ?? []);
+      if (!data.mistoreCandidates?.length) setNotice('No MiStore products found. Try a name, SKU, EAN, or product URL.');
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'Search failed'); }
+    finally { setManualLoading(false); }
+  }
+  async function addCandidate(candidate: MiStoreCandidate) {
+    const response = await fetch('/api/products', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ products: [{ sku: candidate.sku, productName: candidate.name, ean: candidate.ean }] }) });
+    const data = await response.json() as ApiPayload; if (!response.ok) return setNotice(data.error || 'Could not add product');
+    closeImport(); await loadProducts(); setNotice(data.imported ? 'Product added. Looking up four markets.' : 'Existing product updated.');
+    void refreshIds(data.touchedIds ?? data.ids ?? [], COUNTRIES, true);
+  }
   function setParsedMatrix(rows: Matrix) {
     setMatrix(rows);
-    const headers = rows[0] ?? [];
-    setColumnMap({ sku: guessColumn(headers, headerAliases.sku), name: guessColumn(headers, headerAliases.name, 0), ean: guessColumn(headers, headerAliases.ean), price: guessColumn(headers, headerAliases.price, headers.length > 1 ? 1 : -1) });
+    const first = rows[0] ?? [];
+    const detected = first.some((value) => Object.values(aliases).flat().includes(normalizeHeader(value)));
+    setHasHeader(detected);
+    setColumns({ sku: columnIndex(first, aliases.sku, detected ? -1 : 0), name: columnIndex(first, aliases.name, detected ? -1 : first.length > 1 ? 1 : -1), ean: columnIndex(first, aliases.ean, detected ? -1 : first.length > 2 ? 2 : -1) });
   }
-
   async function chooseFile(file?: File) {
     if (!file) return;
     try {
-      const rows = file.name.toLowerCase().endsWith('.csv') ? parseCsv(await file.text()) : await readXlsxFile(file) as Matrix;
-      setParsedMatrix(rows);
-      setNotice(`已读取 ${Math.max(0, rows.length - 1)} 行，请确认字段映射`);
-    } catch { setNotice('文件读取失败，请使用有效的 .xlsx 或 .csv 文件'); }
+      const rows = file.name.toLowerCase().endsWith('.csv') || file.name.toLowerCase().endsWith('.tsv') ? parseDelimited(await file.text()) : await readXlsxFile(file) as Matrix;
+      if (!rows.length) throw new Error('The file contains no rows');
+      setParsedMatrix(rows); setNotice(`Read ${rows.length} rows from ${file.name}. Review the column mapping before importing.`);
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'Could not read the file'); }
+    finally { if (fileRef.current) fileRef.current.value = ''; }
   }
-
-  function parsePaste() {
-    const rows = parseCsv(pasteText.replace(/\t/g, ','));
-    if (!rows.length) return setNotice('请先粘贴数据');
-    setParsedMatrix(rows);
-  }
-
-  async function submitProducts(items: Array<{ sku: string; productName: string; ean: string; ownPrice: number }>) {
-    const valid = items.filter((item) => item.productName && Number.isFinite(item.ownPrice));
-    if (!valid.length) return setNotice('没有找到有效的产品名称和价格');
-    const response = await fetch('/api/products', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ products: valid }) });
-    const data = await response.json() as { imported?: number; error?: string };
-    if (!response.ok) return setNotice(data.error || '导入失败');
-    await loadProducts(); setImportOpen(false); setMatrix([]); setPasteText(''); setManual({ sku: '', name: '', ean: '', price: '' });
-    setNotice(`成功导入 ${data.imported} 个产品`);
-  }
-
-  function importMappedRows() {
-    if (columnMap.name < 0 || columnMap.price < 0) return setNotice('必须选择产品名称和我们的价格列');
-    submitProducts(matrix.slice(1).map((row) => ({
-      sku: columnMap.sku >= 0 ? String(row[columnMap.sku] ?? '') : '', productName: String(row[columnMap.name] ?? '').trim(),
-      ean: columnMap.ean >= 0 ? String(row[columnMap.ean] ?? '') : '', ownPrice: parsePrice(row[columnMap.price]),
-    })));
-  }
-
-  const refreshIds = useCallback(async (ids: string[], quiet = false) => {
-    if (!ids.length || refreshing) return;
-    setRefreshing(true); setProgress({ done: 0, total: ids.length });
-    let errorCount = 0;
-    for (let index = 0; index < ids.length; index += 8) {
-      const chunk = ids.slice(index, index + 8);
-      try {
-        const response = await fetch('/api/refresh', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: chunk }) });
-        const data = await response.json() as { errors?: unknown[] };
-        if (!response.ok) errorCount += chunk.length; else errorCount += data.errors?.length ?? 0;
-      } catch { errorCount += chunk.length; }
-      setProgress({ done: Math.min(index + chunk.length, ids.length), total: ids.length });
-    }
-    await loadProducts(); setRefreshing(false);
-    if (!quiet) setNotice(errorCount ? `刷新完成，${errorCount} 个产品需要人工确认或稍后重试` : `已更新 ${ids.length} 个产品`);
-  }, [loadProducts, refreshing]);
-
-  useEffect(() => {
-    if (loading || !products.length || refreshing) return;
-    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date());
-    const stale = products.filter((product) => !product.updatedAt || new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date(product.updatedAt)) < today);
-    const key = `pricedesk-refresh-${today}`;
-    if (stale.length && !sessionStorage.getItem(key)) {
-      sessionStorage.setItem(key, '1');
-      window.setTimeout(() => refreshIds(stale.map((p) => p.id), true), 0);
-    }
-  }, [clockTick, loading, products, refreshIds, refreshing]);
-
-  async function removeSelected() {
-    if (!selected.size || !window.confirm(`确认删除选中的 ${selected.size} 个产品？`)) return;
-    await fetch('/api/products', { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: [...selected] }) });
-    setSelected(new Set()); await loadProducts(); setNotice('已删除所选产品');
-  }
-
-  async function openMatch(product: Product) {
-    setMatchProduct(product); setCandidates([]); setCandidateLoading(true);
+  async function importRows() {
+    const start = hasHeader ? 1 : 0;
+    const items = matrix.slice(start).map((row) => ({
+      sku: columns.sku >= 0 ? String(row[columns.sku] ?? '').trim() : '',
+      productName: columns.name >= 0 ? String(row[columns.name] ?? '').trim() : '',
+      ean: columns.ean >= 0 ? String(row[columns.ean] ?? '').trim() : '',
+    })).filter((item) => item.sku || item.productName || item.ean);
+    if (!items.length) return setNotice('Choose at least one populated SKU, name, or EAN column.');
+    let imported = 0; let updated = 0; const touchedIds: string[] = [];
     try {
-      const response = await fetch(`/api/search?q=${encodeURIComponent(product.productName)}`);
-      const data = await response.json() as { candidates?: Candidate[]; error?: string };
-      if (!response.ok) throw new Error(data.error || '搜索失败'); setCandidates(data.candidates ?? []);
-    } catch (error) { setNotice(error instanceof Error ? error.message : '搜索失败'); }
-    finally { setCandidateLoading(false); }
+      for (let index = 0; index < items.length; index += 30) {
+        const response = await fetch('/api/products', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ products: items.slice(index, index + 30) }) });
+        const data = await response.json() as ApiPayload; if (!response.ok) throw new Error(data.error || 'Import failed');
+        imported += data.imported ?? 0; updated += data.updated ?? 0; touchedIds.push(...(data.touchedIds ?? []));
+      }
+      closeImport(); await loadProducts(); setNotice(`Imported ${imported} new products and updated ${updated} existing products. Price lookup started.`);
+      void refreshIds(touchedIds, COUNTRIES, true);
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'Import failed'); await loadProducts(); }
   }
-
-  async function chooseCandidate(candidate: Candidate) {
-    if (!matchProduct) return;
-    const response = await fetch('/api/match', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: matchProduct.id, productId: candidate.id, productName: candidate.name, productUrl: candidate.url }) });
-    const data = await response.json() as { error?: string };
-    if (!response.ok) return setNotice(data.error || '保存匹配失败');
-    setMatchProduct(null); await loadProducts(); setNotice('商品匹配已确认');
+  async function deleteSelected() {
+    if (!selected.size || !window.confirm(`Delete ${selected.size} selected product records?`)) return;
+    const ids = [...selected];
+    for (let index = 0; index < ids.length; index += 10) {
+      const response = await fetch('/api/products', { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: ids.slice(index, index + 10) }) });
+      if (!response.ok) { await loadProducts(); return setNotice('Could not delete all selected products.'); }
+    }
+    setSelected(new Set()); await loadProducts();
   }
-
-  function exportRows() {
-    return visibleProducts.map((p) => [p.sku, p.productName, p.ean, p.ownPriceOre / 100, p.matchedProductName ?? '', p.lowPriceOre == null ? '' : p.lowPriceOre / 100, p.lowMerchant ?? '', p.highPriceOre == null ? '' : p.highPriceOre / 100, p.highMerchant ?? '', p.lowPriceOre == null ? '' : (p.ownPriceOre - p.lowPriceOre) / 100, p.highPriceOre == null ? '' : (p.ownPriceOre - p.highPriceOre) / 100, p.matchedProductUrl ?? '', p.matchStatus, p.updatedAt ?? '']);
-  }
-  const exportHeaders = ['SKU', '产品名称', 'EAN', '我们的价格 (SEK)', 'Prisjakt 匹配商品', '市场最低价 (SEK)', '最低价商家', '市场最高价 (SEK)', '最高价商家', '与最低价差额 (SEK)', '与最高价差额 (SEK)', '商品链接', '匹配状态', '更新时间'];
+  const exportGroups = selectedGroups;
+  const exportHeader = ['No.', 'SKU(s)', 'Product', 'EAN(s)', ...COUNTRIES.flatMap((country) => [`${country} MiStore Price`, `${country} Market Lowest`, `${country} Lowest Merchant`, `${country} Expected Price`, `${country} MiStore URL`, `${country} Prisjakt URL`, `${country} Last Manual Refresh`, `${country} Last Auto Refresh`])];
+  const exportRows = exportGroups.map((group) => [numbers.get(group.key) ?? '', group.variants.map((variant) => variant.sku).filter(Boolean).join('; '), group.primary.markets.SE.mistoreName || group.primary.productName, group.variants.map((variant) => variant.ean).filter(Boolean).join('; '), ...COUNTRIES.flatMap((country) => {
+    const market = group.primary.markets[country]; return [priceRange(group, country), market.lowPriceMinor == null ? '' : market.lowPriceMinor / 100,
+      market.lowMerchant ?? '', market.expectedPriceMinor == null ? '' : market.expectedPriceMinor / 100, market.mistoreUrl ?? '', market.marketProductUrl ?? '', market.manualRefreshedAt ?? '', market.autoRefreshedAt ?? ''];
+  })]);
   function exportCsv() {
-    const csv = [exportHeaders, ...exportRows()].map((row) => row.map(csvEscape).join(',')).join('\r\n');
-    const link = document.createElement('a'); link.href = URL.createObjectURL(new Blob(['\ufeff', csv], { type: 'text/csv;charset=utf-8' })); link.download = `PriceDesk_${new Date().toISOString().slice(0, 10)}.csv`; link.click(); URL.revokeObjectURL(link.href); setExportOpen(false);
+    if (!exportGroups.length) return; const csv = [exportHeader, ...exportRows].map((row) => row.map(escapeCsv).join(',')).join('\r\n');
+    const url = URL.createObjectURL(new Blob(['\ufeff', csv], { type: 'text/csv;charset=utf-8' }));
+    const anchor = document.createElement('a'); anchor.href = url; anchor.download = `PriceDesk_${new Date().toISOString().slice(0, 10)}.csv`; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000); setExportOpen(false);
   }
   async function exportExcel() {
-    const rows = [exportHeaders, ...exportRows()].map((row, rowIndex) => row.map((value) => ({ value, type: typeof value === 'number' ? Number : String, fontWeight: rowIndex === 0 ? 'bold' as const : undefined, backgroundColor: rowIndex === 0 ? '#262626' : undefined, color: rowIndex === 0 ? '#FFFFFF' : '#171717' })));
-    await writeXlsxFile(rows, { fileName: `PriceDesk_${new Date().toISOString().slice(0, 10)}.xlsx`, stickyRowsCount: 1 }); setExportOpen(false);
+    if (!exportGroups.length) return;
+    const rows = [exportHeader, ...exportRows].map((row, index) => row.map((value) => ({ value, type: typeof value === 'number' ? Number : String, fontWeight: index === 0 ? 'bold' as const : undefined, backgroundColor: index === 0 ? '#202020' : undefined, color: index === 0 ? '#ffffff' : '#171717' })));
+    try { await writeXlsxFile(rows, { fileName: `PriceDesk_${new Date().toISOString().slice(0, 10)}.xlsx`, stickyRowsCount: 1 }); setExportOpen(false); }
+    catch (error) { setNotice(error instanceof Error ? error.message : 'Excel export failed'); }
   }
-
-  const allVisibleSelected = visibleProducts.length > 0 && visibleProducts.every((p) => selected.has(p.id));
-
-  return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div className="brand"><span className="brand-mark">P</span><div><strong>PriceDesk</strong><small>Prisjakt 批量比价</small></div></div>
-        <div className="topbar-actions"><span className="sync-state"><i /> 北京时间每日自动更新</span><div className="dropdown-wrap"><button className="button secondary" onClick={() => setExportOpen((v) => !v)}>导出结果⌄</button>{exportOpen && <div className="dropdown"><button onClick={exportExcel}>导出 Excel (.xlsx)</button><button onClick={exportCsv}>导出 CSV</button></div>}</div><button className="button primary" onClick={() => setImportOpen(true)}>＋ 导入产品</button></div>
-      </header>
-
-      <section className="workspace">
-        <div className="heading-row"><div><p className="eyebrow">共享工作区</p><h1>自有价格与市场价格，一张表看清</h1><p className="subtitle">批量导入产品，自动匹配 Prisjakt 报价并排除 Mistore / Mistore.se。</p></div><button className="button refresh" disabled={refreshing || !products.length} onClick={() => refreshIds((selected.size ? products.filter((p) => selected.has(p.id)) : visibleProducts).map((p) => p.id))}>{refreshing ? `更新中 ${progress.done}/${progress.total}` : '↻ 刷新市场价'}</button></div>
-
-        <div className="metrics" aria-label="价格概览"><article><span>产品总数</span><strong>{counts.all}</strong><small>共享产品库</small></article><article><span>已取得市场价</span><strong>{counts.matched}</strong><small>{counts.all ? `${Math.round(counts.matched / counts.all * 100)}% 已完成` : '等待导入'}</small></article><article><span>我方高于最低价</span><strong>{counts.above}</strong><small>需要关注</small></article><article><span>待人工确认</span><strong>{counts.pending}</strong><small>点击行末进行匹配</small></article></div>
-
-        <section className="data-panel">
-          <div className="toolbar"><label className="search-box"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} aria-label="搜索产品" placeholder="搜索 SKU、EAN 或产品名称" /></label><div className="filter-group"><button className={`chip ${filter === 'all' ? 'active' : ''}`} onClick={() => setFilter('all')}>全部 {counts.all}</button><button className={`chip ${filter === 'above' ? 'active' : ''}`} onClick={() => setFilter('above')}>高于市场 {counts.above}</button><button className={`chip ${filter === 'below' ? 'active' : ''}`} onClick={() => setFilter('below')}>不高于市场 {counts.below}</button><button className={`chip ${filter === 'pending' ? 'active' : ''}`} onClick={() => setFilter('pending')}>待确认 {counts.pending}</button></div>{selected.size > 0 && <button className="delete-button" onClick={removeSelected}>删除 {selected.size} 项</button>}</div>
-          <div className="table-wrap"><table><thead><tr><th className="check"><input type="checkbox" checked={allVisibleSelected} onChange={() => setSelected(allVisibleSelected ? new Set() : new Set(visibleProducts.map((p) => p.id)))} aria-label="选择全部可见产品" /></th><th>SKU / 产品</th><th>我们的价格</th><th>市场最低价</th><th>市场最高价</th><th>与最低价差额</th><th>与最高价差额</th><th>匹配 / 更新</th><th /></tr></thead><tbody>
-            {loading ? <tr><td colSpan={9} className="state-row">正在读取共享产品库…</td></tr> : visibleProducts.length === 0 ? <tr><td colSpan={9} className="state-row"><strong>{products.length ? '没有符合当前条件的产品' : '还没有产品'}</strong><small>{products.length ? '更换筛选条件或搜索词' : '点击“导入产品”添加 Excel、CSV 或手动输入'}</small></td></tr> : visibleProducts.map((p) => {
-              const diffLow = percentDifference(p.ownPriceOre, p.lowPriceOre); const diffHigh = percentDifference(p.ownPriceOre, p.highPriceOre);
-              return <tr key={p.id}><td className="check"><input type="checkbox" checked={selected.has(p.id)} onChange={() => setSelected((current) => { const next = new Set(current); if (next.has(p.id)) next.delete(p.id); else next.add(p.id); return next; })} aria-label={`选择 ${p.productName}`} /></td><td className="product-cell"><strong>{p.productName}</strong><small>{[p.sku, p.ean].filter(Boolean).join(' · ') || '无 SKU / EAN'}</small></td><td className="number strong-number">{formatMoney(p.ownPriceOre, p.currency)}</td><td className="number"><a href={p.lowUrl ?? undefined} target="_blank" rel="noreferrer"><strong>{formatMoney(p.lowPriceOre, p.currency)}</strong><small>{p.lowMerchant ?? '等待刷新'}</small></a></td><td className="number"><a href={p.highUrl ?? undefined} target="_blank" rel="noreferrer"><strong>{formatMoney(p.highPriceOre, p.currency)}</strong><small>{p.highMerchant ?? '等待刷新'}</small></a></td><td className={`number difference ${diffLow != null && diffLow <= 0 ? 'positive' : ''}`}><strong>{formatDifference(p.ownPriceOre, p.lowPriceOre)}</strong><small>{diffLow == null ? '' : `${diffLow > 0 ? '+' : ''}${diffLow.toFixed(1)}%`}</small></td><td className={`number difference ${diffHigh != null && diffHigh <= 0 ? 'positive' : ''}`}><strong>{formatDifference(p.ownPriceOre, p.highPriceOre)}</strong><small>{diffHigh == null ? '' : `${diffHigh > 0 ? '+' : ''}${diffHigh.toFixed(1)}%`}</small></td><td className="match-cell"><a href={p.matchedProductUrl ?? undefined} target="_blank" rel="noreferrer"><strong>{p.matchedProductName ?? (p.matchStatus === 'not_found' ? '未找到商品' : '等待自动匹配')}</strong></a><small>{p.matchConfidence != null ? `${p.matchConfidence}% 匹配 · ` : ''}{localDate(p.updatedAt)}</small></td><td><button className="match-button" onClick={() => openMatch(p)}>{p.matchStatus === 'confirmed' ? '更改' : '确认'}</button></td></tr>;
-            })}
-          </tbody></table></div>
-          <div className="table-footer"><span>显示 {visibleProducts.length} / {products.length} 个产品</span><button className="text-button" onClick={() => setImportOpen(true)}>＋ 添加更多产品</button></div>
-        </section>
-      </section>
-
-      {notice && <div className="toast" role="status"><span>{notice}</span><button onClick={() => setNotice('')}>×</button></div>}
-
-      {importOpen && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setImportOpen(false)}><section className="modal import-modal"><header><div><p className="eyebrow">批量导入</p><h2>添加产品与我们的价格</h2></div><button className="close" onClick={() => setImportOpen(false)}>×</button></header><div className="import-grid"><div className="import-method"><h3>上传 Excel / CSV</h3><p>第一行应为字段表头，支持最多 1,200 行。</p><input ref={fileRef} type="file" accept=".xlsx,.csv" hidden onChange={(event) => chooseFile(event.target.files?.[0])} /><button className="upload-area" onClick={() => fileRef.current?.click()}><span>⇧</span><strong>选择 .xlsx 或 .csv 文件</strong><small>系统会自动识别 SKU、名称、EAN 与价格列</small></button></div><div className="import-method"><h3>粘贴表格</h3><p>可直接从 Excel 或 Numbers 复制后粘贴。</p><textarea value={pasteText} onChange={(event) => setPasteText(event.target.value)} placeholder={'SKU\t产品名称\tEAN\t我们的价格\nBHR6068EU\tXiaomi Robot Vacuum S10\t...\t2899'} /><button className="button secondary full" onClick={parsePaste}>读取粘贴内容</button></div><div className="import-method"><h3>手动添加一个产品</h3><p>适合临时查询单个商品。</p><div className="manual-fields"><input placeholder="SKU（选填）" value={manual.sku} onChange={(e) => setManual({ ...manual, sku: e.target.value })} /><input placeholder="产品名称 *" value={manual.name} onChange={(e) => setManual({ ...manual, name: e.target.value })} /><input placeholder="EAN（选填）" value={manual.ean} onChange={(e) => setManual({ ...manual, ean: e.target.value })} /><input placeholder="我们的价格 (SEK) *" value={manual.price} onChange={(e) => setManual({ ...manual, price: e.target.value })} /></div><button className="button secondary full" onClick={() => submitProducts([{ sku: manual.sku, productName: manual.name.trim(), ean: manual.ean, ownPrice: parsePrice(manual.price) }])}>添加产品</button></div></div>
-        {matrix.length > 0 && <div className="mapping"><div className="mapping-head"><div><h3>确认字段映射</h3><p>已读取 {Math.max(0, matrix.length - 1)} 行。产品名称和价格为必选字段。</p></div><button className="button primary" onClick={importMappedRows}>导入 {Math.max(0, matrix.length - 1)} 行</button></div><div className="mapping-fields">{([['sku', 'SKU'], ['name', '产品名称 *'], ['ean', 'EAN'], ['price', '我们的价格 *']] as const).map(([key, label]) => <label key={key}><span>{label}</span><select value={columnMap[key]} onChange={(e) => setColumnMap({ ...columnMap, [key]: Number(e.target.value) })}><option value={-1}>不导入</option>{(matrix[0] ?? []).map((header, index) => <option key={index} value={index}>{String(header || `第 ${index + 1} 列`)}</option>)}</select></label>)}</div><div className="preview-table"><table><thead><tr>{(matrix[0] ?? []).map((header, index) => <th key={index}>{String(header)}</th>)}</tr></thead><tbody>{matrix.slice(1, 4).map((row, rowIndex) => <tr key={rowIndex}>{(matrix[0] ?? []).map((_, index) => <td key={index}>{String(row[index] ?? '')}</td>)}</tr>)}</tbody></table></div></div>}
-      </section></div>}
-
-      {matchProduct && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setMatchProduct(null)}><section className="modal match-modal"><header><div><p className="eyebrow">人工确认</p><h2>选择正确的 Prisjakt 商品</h2><p className="modal-subtitle">{matchProduct.productName}</p></div><button className="close" onClick={() => setMatchProduct(null)}>×</button></header><div className="candidate-list">{candidateLoading ? <div className="state-row">正在搜索 Prisjakt…</div> : candidates.length === 0 ? <div className="state-row">没有找到候选商品</div> : candidates.map((candidate) => <button key={candidate.id} className="candidate" onClick={() => chooseCandidate(candidate)}><div><strong>{candidate.name}</strong><small>Prisjakt ID {candidate.id} · 预览价 {candidate.previewPrice == null ? '—' : `${candidate.previewPrice} ${candidate.currency}`}</small></div><span>{candidate.confidence}% 匹配</span></button>)}</div></section></div>}
-    </main>
-  );
+  return <main className="app-shell">
+    <header className="topbar"><div className="brand"><span className="brand-mark">P</span><strong>PriceDesk</strong></div><div className="topbar-actions">
+      <div className="dropdown-wrap"><button className="button" onClick={() => setExportOpen(!exportOpen)} disabled={!selectedGroups.length}>Export selected ({selectedGroups.length})</button>
+        {exportOpen && <div className="dropdown"><button onClick={exportExcel}>Excel (.xlsx)</button><button onClick={exportCsv}>CSV (.csv)</button></div>}</div>
+      <button className="button primary" onClick={() => setImportOpen(true)}>Import products</button>
+    </div></header>
+    <section className="toolbar">
+      <label className="search-box"><input value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder="Search SKU, product name or EAN" /></label>
+      <select aria-label="Price status" value={filter} onChange={(event) => { setFilter(event.target.value); setPage(1); }}><option value="all">All prices</option><option value="above">Above market</option><option value="pending">Needs review</option></select>
+      <select aria-label="Country filter" value={filterCountry} onChange={(event) => { setFilterCountry(event.target.value as Country | 'ALL'); setPage(1); }}><option value="ALL">All countries</option>{COUNTRIES.map((country) => <option key={country}>{country}</option>)}</select>
+      <button className="button" disabled={refreshing || !selected.size} onClick={() => void refreshIds([...selected])}>{refreshing ? `Refreshing ${progress.done}/${progress.total}` : `Refresh selected (${selectedGroups.length})`}</button>
+      {selected.size > 0 && <button className="delete-button" onClick={deleteSelected}>Delete selected</button>}
+      <div className="toolbar-meta"><span>Manual (Stockholm): {dateLabel(lastManual)}</span><span>Automatic (Stockholm): {dateLabel(lastAuto)}</span></div>
+      <div className="pager"><span>{filtered.length ? `${(safePage - 1) * 50 + 1}–${Math.min(safePage * 50, filtered.length)}` : '0'} / {filtered.length}</span><button disabled={safePage <= 1} onClick={() => setPage(safePage - 1)} aria-label="Previous page">‹</button><span>{safePage} / {pageCount}</span><button disabled={safePage >= pageCount} onClick={() => setPage(safePage + 1)} aria-label="Next page">›</button></div>
+    </section>
+    <section className="grid-wrap"><table className="price-grid"><thead><tr>
+      <th rowSpan={2} className="check"><input aria-label="Select current page" type="checkbox" checked={allPageSelected} onChange={togglePage}/></th><th rowSpan={2} className="product-head">No. / SKU / Product</th>
+      {COUNTRIES.map((country) => <th key={country} colSpan={3} className="country-head">{country} <small>({currency[country]})</small></th>)}<th rowSpan={2} className="action-head">Actions</th>
+    </tr><tr>{COUNTRIES.flatMap((country) => [<th key={`${country}-own`}>MiStore Price</th>, <th key={`${country}-market`}>Lowest Price<br/>in Market</th>, <th key={`${country}-expected`}>Expected Price</th>])}</tr></thead><tbody>
+      {loading ? <tr><td colSpan={15} className="state-row">Loading products…</td></tr> : !pageRows.length ? <tr><td colSpan={15} className="state-row">No products match this filter.</td></tr> : pageRows.map((group) => {
+        const product = group.primary; const groupIndex = filtered.findIndex((item) => item.key === group.key); const checked = group.members.every((member) => selected.has(member.id));
+        return <tr key={group.key}><td className="check"><input type="checkbox" checked={checked} readOnly onClick={(event) => toggleGroup(group, groupIndex, event.shiftKey)} aria-label={`Select product ${numbers.get(group.key)}`}/></td>
+          <td className="product-cell"><strong><span className="row-number">{numbers.get(group.key)}.</span> {product.sku || group.variants[0]?.sku || '—'}</strong><span title={product.markets.SE.mistoreName || product.productName}>{product.markets.SE.mistoreName || product.productName}</span>
+            {group.variants.length > 1 ? <span className="variant-trigger" tabIndex={0}>Variants ({group.variants.length})<span className="variant-popover">{group.variants.map((variant, index) => <span key={`${variant.sku}|${variant.ean}|${index}`}>{variant.title || `Variant ${index + 1}`} · SKU {variant.sku || '—'} · EAN {variant.ean || '—'}</span>)}</span></span> : <small>{product.ean || group.variants[0]?.ean || 'No EAN'}</small>}
+          </td>
+          {COUNTRIES.flatMap((country) => {
+            const market = product.markets[country]; const ownDiff = rangeDifference(group, country, market.lowPriceMinor); const expectedDiff = difference(market.expectedPriceMinor, market.lowPriceMinor); const key = `${product.id}:${country}`;
+            const tooltip = `Manual: ${dateLabel(market.manualRefreshedAt)} | Automatic: ${dateLabel(market.autoRefreshedAt)}`;
+            return [<td key={`${country}-own`} className="price-cell" title={tooltip}><a className="price-link" href={market.mistoreUrl || undefined} target="_blank" rel="noreferrer" title={priceRange(group, country)}>{priceRange(group, country)}</a><small className={ownDiff ? ownDiff.percentage > 0 ? 'bad' : 'good' : 'neutral'}>{ownDiff?.label ?? '—'}</small></td>,
+              <td key={`${country}-market`} className="price-cell" title={tooltip}><a className="price-link" href={market.marketProductUrl || undefined} target="_blank" rel="noreferrer">{money(market.lowPriceMinor, country)}</a><small className="merchant" title={market.lowMerchant ?? ''}>{market.lowMerchant || 'Not matched'}</small></td>,
+              <td key={`${country}-expected`} className="price-cell expected-cell"><input aria-label={`${country} Expected Price for product ${numbers.get(group.key)}`} value={key in expectedDraft ? expectedDraft[key] : market.expectedPriceMinor == null ? '' : String(market.expectedPriceMinor / 100)} onChange={(event) => setExpectedDraft((draft) => ({ ...draft, [key]: event.target.value }))} onBlur={() => void saveExpected(product, country)} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }} placeholder="—"/><small className={expectedDiff ? expectedDiff.percentage > 0 ? 'bad' : 'good' : 'neutral'}>{expectedDiff?.label ?? '—'}</small></td>];
+          })}<td className="action-cell"><button className="match-button" onClick={() => openMatch(product)}>Match / Edit</button></td>
+        </tr>;
+      })}
+    </tbody></table></section>
+    {notice && <div className="toast"><span>{notice}</span><button onClick={() => setNotice('')} aria-label="Dismiss notification">×</button></div>}
+    {importOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeImport(); }}><section className="modal import-modal"><header><div><h2>Import products</h2><p>Search MiStore by SKU, name, EAN, or product URL. Choose the correct product.</p></div><button className="close" onClick={closeImport}>Close</button></header>
+      <div className="manual-search"><input value={manualQuery} onChange={(event) => setManualQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void searchManual(); }} placeholder="SKU, name, EAN or MiStore URL"/><button className="button primary" onClick={searchManual} disabled={manualLoading}>{manualLoading ? 'Searching…' : 'Search MiStore'}</button></div>
+      {!!manualCandidates.length && <div className="candidate-list">{manualCandidates.map((candidate) => <button key={`${candidate.handle}|${candidate.sku}`} className="candidate" onClick={() => void addCandidate(candidate)}><div><strong>{candidate.name}</strong><small>SKU {candidate.sku || '—'} · EAN {candidate.ean || '—'} · {candidate.variantTitle}</small></div><span>{money(candidate.priceMinor, 'SE')}</span></button>)}</div>}
+      <div className="import-divider"><span>Or import a file / pasted rows</span></div><div className="batch-import"><input ref={fileRef} type="file" accept=".xlsx,.csv,.tsv" hidden onChange={(event) => void chooseFile(event.target.files?.[0])}/><button className="button" onClick={() => fileRef.current?.click()}>Choose Excel / CSV</button><textarea value={pasteText} onChange={(event) => setPasteText(event.target.value)} placeholder={'SKU\tProduct Name\tEAN'}/><button className="button" onClick={() => setParsedMatrix(parseDelimited(pasteText))}>Read pasted rows</button></div>
+      {!!matrix.length && <div className="mapping"><div><label className="header-toggle"><input type="checkbox" checked={hasHeader} onChange={(event) => setHasHeader(event.target.checked)}/> First row contains column names</label><p className="import-preview">{Math.max(0, matrix.length - (hasHeader ? 1 : 0))} data rows · Preview: {matrix.slice(hasHeader ? 1 : 0, (hasHeader ? 1 : 0) + 2).map((row) => row.join(' | ')).join(' / ')}</p><div className="mapping-fields">{(['sku', 'name', 'ean'] as const).map((field) => <label key={field}>{field === 'name' ? 'Product Name' : field.toUpperCase()}<select value={columns[field]} onChange={(event) => setColumns({ ...columns, [field]: Number(event.target.value) })}><option value={-1}>Do not use</option>{(matrix[0] ?? []).map((value, index) => <option key={index} value={index}>{hasHeader ? String(value || `Column ${index + 1}`) : `Column ${index + 1}`}</option>)}</select></label>)}</div></div><button className="button primary" onClick={importRows}>Import rows</button></div>}
+    </section></div>}
+    {activeMatch && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setMatchProduct(null); }}><section className="modal match-modal"><header><div><h2>Match or edit products</h2><p>{activeMatch.productName} · {activeMatch.sku || activeMatch.ean}</p></div><button className="close" onClick={() => setMatchProduct(null)}>Close</button></header>
+      <nav className="country-tabs">{COUNTRIES.map((country) => <button key={country} className={matchCountry === country ? 'active' : ''} onClick={() => changeCountry(country)}>{country}</button>)}</nav>
+      <div className="match-columns"><section><h3>MiStore product</h3><p className="current-match">Current: {activeMatch.markets[matchCountry].mistoreName || 'Not matched'}</p><div className="match-search"><input value={mistoreQuery} onChange={(event) => setMistoreQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void lookup('mistore', matchCountry, mistoreQuery); }} placeholder="Name, SKU, EAN or MiStore URL"/><button className="button" onClick={() => void lookup('mistore', matchCountry, mistoreQuery)}>Search</button></div><button className="remove-match" onClick={() => void removeMatch('mistore')} disabled={!activeMatch.markets[matchCountry].mistoreHandle}>Remove MiStore match</button><div className="candidate-list">{mistoreLoading ? <p className="candidate-empty">Searching…</p> : mistoreCandidates.length ? mistoreCandidates.map((candidate) => <button key={`${candidate.handle}|${candidate.sku}`} className="candidate" onClick={() => void chooseMiStore(candidate)}><div><strong>{candidate.name}</strong><small>SKU {candidate.sku || '—'} · EAN {candidate.ean || '—'}</small></div><span>{money(candidate.priceMinor, matchCountry)}</span></button>) : <p className="candidate-empty">No results. Try a broader name or paste the product URL.</p>}</div></section>
+      <section><h3>Prisjakt product</h3><p className="current-match">Current: {activeMatch.markets[matchCountry].marketProductName || 'Not matched'}</p><div className="match-search"><input value={marketQuery} onChange={(event) => setMarketQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void lookup('market', matchCountry, marketQuery); }} placeholder="Name, EAN, product URL or ID"/><button className="button" onClick={() => void lookup('market', matchCountry, marketQuery)}>Search</button></div><button className="remove-match" onClick={() => void removeMatch('market')} disabled={!activeMatch.markets[matchCountry].marketProductId}>Remove Prisjakt match</button><div className="candidate-list">{marketLoading ? <p className="candidate-empty">Searching…</p> : marketCandidates.length ? marketCandidates.map((candidate) => <button key={candidate.id} className="candidate" onClick={() => void chooseMarket(candidate)}><div><strong>{candidate.name}</strong><small>Product ID {candidate.id} · {candidate.previewPrice ?? '—'} {candidate.currency}</small></div><span>{candidate.confidence}%</span></button>) : <p className="candidate-empty">No results. Try the EAN or paste the Prisjakt product page URL.</p>}</div></section></div>
+      <footer className="modal-footer"><button className="button" onClick={() => void refreshIds([activeMatch.id], [matchCountry])}>Refresh {matchCountry} only</button></footer>
+    </section></div>}
+  </main>;
 }

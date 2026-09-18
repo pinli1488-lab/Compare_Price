@@ -1,63 +1,153 @@
 import { env } from 'cloudflare:workers';
+import { COUNTRIES, COUNTRY_CODES, type CountryCode } from '@/lib/countries';
 
+export type MatchStatus = 'pending' | 'auto' | 'confirmed' | 'not_found';
+export type CountryPriceRecord = {
+  country: CountryCode; currency: string;
+  mistoreHandle: string | null; mistoreName: string | null; mistoreUrl: string | null; mistorePriceMinor: number | null;
+  marketProductId: string | null; marketProductName: string | null; marketProductUrl: string | null;
+  matchConfidence: number | null; matchStatus: MatchStatus;
+  lowPriceMinor: number | null; lowMerchant: string | null; lowUrl: string | null;
+  expectedPriceMinor: number | null; updatedAt: string | null; manualRefreshedAt: string | null; autoRefreshedAt: string | null;
+};
+export type ProductVariant = { sku: string; ean: string; title: string; priceMinor: number };
 export type ProductRecord = {
-  id: string; sku: string; productName: string; ean: string; ownPriceOre: number; currency: string;
-  matchedProductId: string | null; matchedProductName: string | null; matchedProductUrl: string | null;
-  matchConfidence: number | null; matchStatus: 'pending' | 'auto' | 'confirmed' | 'not_found';
-  lowPriceOre: number | null; lowMerchant: string | null; lowUrl: string | null;
-  highPriceOre: number | null; highMerchant: string | null; highUrl: string | null;
-  updatedAt: string | null; createdAt: string;
+  id: string; sku: string; productName: string; ean: string; createdAt: string;
+  markets: Record<CountryCode, CountryPriceRecord>; variants: Record<CountryCode, ProductVariant[]>;
 };
 
 let initialized = false;
-
-export function getD1() {
-  if (!env.DB) throw new Error('D1 database is unavailable');
-  return env.DB;
-}
+export function getD1() { if (!env.DB) throw new Error('D1 database is unavailable'); return env.DB; }
 
 export async function ensureSchema() {
   if (initialized) return;
   const db = getD1();
   await db.batch([
     db.prepare(`CREATE TABLE IF NOT EXISTS products (
-      id TEXT PRIMARY KEY,
-      sku TEXT NOT NULL DEFAULT '',
-      product_name TEXT NOT NULL,
-      ean TEXT NOT NULL DEFAULT '',
-      own_price_ore INTEGER NOT NULL,
-      currency TEXT NOT NULL DEFAULT 'SEK',
-      matched_product_id TEXT,
-      matched_product_name TEXT,
-      matched_product_url TEXT,
-      match_confidence INTEGER,
-      match_status TEXT NOT NULL DEFAULT 'pending',
-      low_price_ore INTEGER,
-      low_merchant TEXT,
-      low_url TEXT,
-      high_price_ore INTEGER,
-      high_merchant TEXT,
-      high_url TEXT,
-      updated_at TEXT,
-      created_at TEXT NOT NULL
+      id TEXT PRIMARY KEY, sku TEXT NOT NULL DEFAULT '', product_name TEXT NOT NULL, ean TEXT NOT NULL DEFAULT '',
+      own_price_ore INTEGER NOT NULL DEFAULT 0, currency TEXT NOT NULL DEFAULT 'SEK', matched_product_id TEXT,
+      matched_product_name TEXT, matched_product_url TEXT, match_confidence INTEGER, match_status TEXT NOT NULL DEFAULT 'pending',
+      low_price_ore INTEGER, low_merchant TEXT, low_url TEXT, high_price_ore INTEGER, high_merchant TEXT, high_url TEXT,
+      updated_at TEXT, created_at TEXT NOT NULL
     )`),
-    db.prepare('CREATE INDEX IF NOT EXISTS idx_products_match_status ON products(match_status)'),
-    db.prepare('CREATE INDEX IF NOT EXISTS idx_products_updated_at ON products(updated_at)'),
+    db.prepare(`CREATE TABLE IF NOT EXISTS product_country_prices (
+      product_id TEXT NOT NULL, country TEXT NOT NULL, currency TEXT NOT NULL,
+      mistore_handle TEXT, mistore_name TEXT, mistore_url TEXT, mistore_price_minor INTEGER,
+      market_product_id TEXT, market_product_name TEXT, market_product_url TEXT,
+      match_confidence INTEGER, match_status TEXT NOT NULL DEFAULT 'pending',
+      low_price_minor INTEGER, low_merchant TEXT, low_url TEXT, expected_price_minor INTEGER, updated_at TEXT,
+      PRIMARY KEY (product_id, country)
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS product_variants (
+      product_id TEXT NOT NULL, country TEXT NOT NULL, variants_json TEXT NOT NULL,
+      PRIMARY KEY (product_id, country)
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS price_refresh_log (
+      product_id TEXT NOT NULL, country TEXT NOT NULL, manual_at TEXT, auto_at TEXT,
+      PRIMARY KEY (product_id, country)
+    )`),
+    db.prepare(`INSERT OR IGNORE INTO product_country_prices (
+      product_id,country,currency,market_product_id,market_product_name,market_product_url,
+      match_confidence,match_status
+    ) SELECT id,'SE','SEK',matched_product_id,matched_product_name,matched_product_url,
+      match_confidence,match_status FROM products`),
+    db.prepare(`UPDATE product_country_prices SET low_price_minor=NULL, low_merchant=NULL, low_url=NULL, updated_at=NULL
+      WHERE mistore_handle IS NULL AND (low_price_minor IS NOT NULL OR low_merchant IS NOT NULL OR low_url IS NOT NULL)`),
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_country_prices_updated ON product_country_prices(updated_at)'),
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_country_prices_status ON product_country_prices(match_status)'),
   ]);
   initialized = true;
 }
 
-export function mapProduct(row: Record<string, unknown>): ProductRecord {
+export function emptyCountryPrice(country: CountryCode): CountryPriceRecord {
   return {
-    id: String(row.id), sku: String(row.sku ?? ''), productName: String(row.product_name), ean: String(row.ean ?? ''),
-    ownPriceOre: Number(row.own_price_ore), currency: String(row.currency ?? 'SEK'),
-    matchedProductId: row.matched_product_id ? String(row.matched_product_id) : null,
-    matchedProductName: row.matched_product_name ? String(row.matched_product_name) : null,
-    matchedProductUrl: row.matched_product_url ? String(row.matched_product_url) : null,
-    matchConfidence: row.match_confidence == null ? null : Number(row.match_confidence),
-    matchStatus: String(row.match_status) as ProductRecord['matchStatus'],
-    lowPriceOre: row.low_price_ore == null ? null : Number(row.low_price_ore), lowMerchant: row.low_merchant ? String(row.low_merchant) : null, lowUrl: row.low_url ? String(row.low_url) : null,
-    highPriceOre: row.high_price_ore == null ? null : Number(row.high_price_ore), highMerchant: row.high_merchant ? String(row.high_merchant) : null, highUrl: row.high_url ? String(row.high_url) : null,
-    updatedAt: row.updated_at ? String(row.updated_at) : null, createdAt: String(row.created_at),
+    country, currency: COUNTRIES[country].currency,
+    mistoreHandle: null, mistoreName: null, mistoreUrl: null, mistorePriceMinor: null,
+    marketProductId: null, marketProductName: null, marketProductUrl: null,
+    matchConfidence: null, matchStatus: 'pending', lowPriceMinor: null, lowMerchant: null, lowUrl: null,
+    expectedPriceMinor: null, updatedAt: null, manualRefreshedAt: null, autoRefreshedAt: null,
   };
+}
+
+export function mapCountryPrice(row: Record<string, unknown>): CountryPriceRecord {
+  const country = String(row.country) as CountryCode;
+  return {
+    country, currency: String(row.currency ?? COUNTRIES[country].currency),
+    mistoreHandle: row.mistore_handle ? String(row.mistore_handle) : null,
+    mistoreName: row.mistore_name ? String(row.mistore_name) : null,
+    mistoreUrl: row.mistore_url ? String(row.mistore_url) : null,
+    mistorePriceMinor: row.mistore_price_minor == null ? null : Number(row.mistore_price_minor),
+    marketProductId: row.market_product_id ? String(row.market_product_id) : null,
+    marketProductName: row.market_product_name ? String(row.market_product_name) : null,
+    marketProductUrl: row.market_product_url ? String(row.market_product_url) : null,
+    matchConfidence: row.match_confidence == null ? null : Number(row.match_confidence),
+    matchStatus: String(row.match_status ?? 'pending') as MatchStatus,
+    lowPriceMinor: row.low_price_minor == null ? null : Number(row.low_price_minor),
+    lowMerchant: row.low_merchant ? String(row.low_merchant) : null,
+    lowUrl: row.low_url ? String(row.low_url) : null,
+    expectedPriceMinor: row.expected_price_minor == null ? null : Number(row.expected_price_minor),
+    updatedAt: row.updated_at ? String(row.updated_at) : null,
+    manualRefreshedAt: row.manual_at ? String(row.manual_at) : null,
+    autoRefreshedAt: row.auto_at ? String(row.auto_at) : null,
+  };
+}
+
+export function mapProducts(productRows: Record<string, unknown>[], countryRows: Record<string, unknown>[], variantRows: Record<string, unknown>[] = []): ProductRecord[] {
+  const countriesByProduct = new Map<string, Record<CountryCode, CountryPriceRecord>>();
+  const variantsByProduct = new Map<string, Record<CountryCode, ProductVariant[]>>();
+  for (const row of variantRows) {
+    const country = String(row.country) as CountryCode;
+    if (!COUNTRY_CODES.includes(country)) continue;
+    try {
+      const variants = variantsByProduct.get(String(row.product_id)) ?? Object.fromEntries(COUNTRY_CODES.map((code) => [code, []])) as unknown as Record<CountryCode, ProductVariant[]>;
+      variants[country] = JSON.parse(String(row.variants_json)) as ProductVariant[];
+      variantsByProduct.set(String(row.product_id), variants);
+    } catch { /* Ignore invalid historic metadata. */ }
+  }
+  for (const row of countryRows) {
+    const productId = String(row.product_id); const country = String(row.country) as CountryCode;
+    if (!COUNTRY_CODES.includes(country)) continue;
+    const markets = countriesByProduct.get(productId) ?? Object.fromEntries(COUNTRY_CODES.map((code) => [code, emptyCountryPrice(code)])) as Record<CountryCode, CountryPriceRecord>;
+    markets[country] = mapCountryPrice(row); countriesByProduct.set(productId, markets);
+  }
+  return productRows.map((row) => ({
+    id: String(row.id), sku: String(row.sku ?? ''), productName: String(row.product_name), ean: String(row.ean ?? ''), createdAt: String(row.created_at),
+    markets: countriesByProduct.get(String(row.id)) ?? Object.fromEntries(COUNTRY_CODES.map((code) => [code, emptyCountryPrice(code)])) as Record<CountryCode, CountryPriceRecord>,
+    variants: variantsByProduct.get(String(row.id)) ?? Object.fromEntries(COUNTRY_CODES.map((code) => [code, []])) as unknown as Record<CountryCode, ProductVariant[]>,
+  }));
+}
+
+export async function saveVariants(productId: string, country: CountryCode, variants: ProductVariant[]) {
+  await getD1().prepare(`INSERT INTO product_variants(product_id,country,variants_json) VALUES(?,?,?)
+    ON CONFLICT(product_id,country) DO UPDATE SET variants_json=excluded.variants_json`)
+    .bind(productId, country, JSON.stringify(variants)).run();
+}
+
+export async function recordRefresh(productId: string, country: CountryCode, source: 'manual' | 'auto', timestamp: string) {
+  const column = source === 'auto' ? 'auto_at' : 'manual_at';
+  await getD1().prepare(`INSERT INTO price_refresh_log(product_id,country,${column}) VALUES(?,?,?)
+    ON CONFLICT(product_id,country) DO UPDATE SET ${column}=excluded.${column}`)
+    .bind(productId, country, timestamp).run();
+}
+
+export async function getProduct(id: string) {
+  const result = await getD1().prepare('SELECT id, sku, product_name, ean, created_at FROM products WHERE id = ?').bind(id).first();
+  return result ? { id: String(result.id), sku: String(result.sku ?? ''), productName: String(result.product_name), ean: String(result.ean ?? ''), createdAt: String(result.created_at) } : null;
+}
+
+export async function upsertCountryPrice(productId: string, value: CountryPriceRecord) {
+  await getD1().prepare(`INSERT INTO product_country_prices (
+    product_id,country,currency,mistore_handle,mistore_name,mistore_url,mistore_price_minor,
+    market_product_id,market_product_name,market_product_url,match_confidence,match_status,
+    low_price_minor,low_merchant,low_url,expected_price_minor,updated_at
+  ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(product_id,country) DO UPDATE SET
+    currency=excluded.currency,mistore_handle=excluded.mistore_handle,mistore_name=excluded.mistore_name,
+    mistore_url=excluded.mistore_url,mistore_price_minor=excluded.mistore_price_minor,
+    market_product_id=excluded.market_product_id,market_product_name=excluded.market_product_name,
+    market_product_url=excluded.market_product_url,match_confidence=excluded.match_confidence,match_status=excluded.match_status,
+    low_price_minor=excluded.low_price_minor,low_merchant=excluded.low_merchant,low_url=excluded.low_url,
+    expected_price_minor=excluded.expected_price_minor,updated_at=excluded.updated_at`)
+    .bind(productId, value.country, value.currency, value.mistoreHandle, value.mistoreName, value.mistoreUrl, value.mistorePriceMinor,
+      value.marketProductId, value.marketProductName, value.marketProductUrl, value.matchConfidence, value.matchStatus,
+      value.lowPriceMinor, value.lowMerchant, value.lowUrl, value.expectedPriceMinor, value.updatedAt).run();
 }

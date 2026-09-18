@@ -1,4 +1,4 @@
-import { index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
+import { index, integer, primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 
 export const products = sqliteTable('products', {
   id: text('id').primaryKey(),
@@ -23,4 +23,17 @@ export const products = sqliteTable('products', {
 }, (table) => [
   index('idx_products_match_status').on(table.matchStatus),
   index('idx_products_updated_at').on(table.updatedAt),
+]);
+
+export const productCountryPrices = sqliteTable('product_country_prices', {
+  productId: text('product_id').notNull(), country: text('country').notNull(), currency: text('currency').notNull(),
+  mistoreHandle: text('mistore_handle'), mistoreName: text('mistore_name'), mistoreUrl: text('mistore_url'), mistorePriceMinor: integer('mistore_price_minor'),
+  marketProductId: text('market_product_id'), marketProductName: text('market_product_name'), marketProductUrl: text('market_product_url'),
+  matchConfidence: integer('match_confidence'), matchStatus: text('match_status').notNull().default('pending'),
+  lowPriceMinor: integer('low_price_minor'), lowMerchant: text('low_merchant'), lowUrl: text('low_url'),
+  expectedPriceMinor: integer('expected_price_minor'), updatedAt: text('updated_at'),
+}, (table) => [
+  primaryKey({ columns: [table.productId, table.country] }),
+  index('idx_country_prices_updated').on(table.updatedAt),
+  index('idx_country_prices_status').on(table.matchStatus),
 ]);

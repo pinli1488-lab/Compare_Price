@@ -5,13 +5,13 @@ PriceDesk is a shared, password-free internal web tool for comparing your own pr
 ## What it does
 
 - Imports `.xlsx` and `.csv` files or pasted spreadsheet rows.
-- Maps SKU, product name, EAN and own-price columns.
-- Matches products through Prisjakt search with a manual confirmation flow.
-- Excludes `Mistore` and `Mistore.se` from market offers.
-- Shows lowest and highest product prices, merchants, differences and links.
-- Exports the current filtered view to Excel or CSV.
+- Maps SKU, product name and EAN columns, then reads each country's current MiStore price automatically.
+- Matches products independently across Sweden, Denmark, Finland and Norway, with manual confirmation for both MiStore and Prisjakt.
+- Excludes MiStore, Refurbed and used or refurbished offers from market results.
+- Shows each country's linked MiStore price, linked lowest market price, merchant, editable expected price and both differences.
+- Exports selected products to Excel or CSV.
 - Stores the shared product list in Cloudflare D1.
-- Refreshes when the app opens after Beijing midnight and supports a GitHub Actions daily schedule.
+- Refreshes daily through a GitHub Actions schedule at 16:00 UTC (midnight Beijing time), with selective manual refresh in the app.
 
 ## Daily schedule
 
@@ -19,7 +19,7 @@ After deployment, add a GitHub repository variable named `PRICE_DESK_URL` contai
 
 ## Data-source note
 
-The current adapter reads Prisjakt's public website as a temporary fallback. This can be affected by rate limits, anti-bot controls, or page changes. The intended production upgrade is Prisjakt's Partner Search API if free access is approved.
+The current adapters read the four MiStore storefronts and Prisjakt country sites through their public website endpoints. This can be affected by rate limits, anti-bot controls, or page changes. The intended production upgrade is Prisjakt's Partner Search API if access is approved.
 
 ## Local development
 
