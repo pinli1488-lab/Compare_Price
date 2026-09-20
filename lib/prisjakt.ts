@@ -19,12 +19,16 @@ function cleanReferenceTitle(value: string) {
     .replace(/\s+-\s+Default Title\s*$/i, '').replace(/\s+/g, ' ').trim();
 }
 
-const ACCESSORY_WORDS = new Set(['case', 'cover', 'screen', 'protector', 'film', 'filter', 'kit', 'charger', 'cable', 'adapter', 'sleeve', 'skal', 'fodral', 'kotelo', 'beskyttelse', 'suojakalvo']);
+const ACCESSORY_WORDS = new Set(['case', 'cover', 'screen', 'protector', 'film', 'filter', 'kit', 'charger', 'cable', 'adapter', 'sleeve', 'skal', 'fodral', 'kotelo', 'beskyttelse', 'suojakalvo', 'brake', 'brakes', 'disc', 'disk', 'bromsskiva', 'bremse', 'bremseskive', 'jarrulevy', 'spare', 'replacement', 'reservdel', 'varaosa']);
 export function isPlausibleProductMatch(reference: string, candidate: string) {
   const cleanReference = cleanReferenceTitle(reference).replace(/^\s*[a-z0-9]{3,}-/i, '');
   const source = tokens(cleanReference); const target = tokens(candidate);
+  // "For Xiaomi Scooter ..." is usually an accessory, even when the model number matches.
+  if (![...ACCESSORY_WORDS].some((word) => source.has(word)) &&
+    /(?:^|\s)(?:for|för|til|varten|passar)\s+(?:xiaomi|redmi|mi)\b/i.test(candidate)) return false;
   for (const word of ACCESSORY_WORDS) if (target.has(word) && !source.has(word)) return false;
   for (const marker of VARIANT_MARKERS) if (source.has(marker) !== target.has(marker)) return false;
+  if ((source.has('4g') && target.has('5g')) || (source.has('5g') && target.has('4g'))) return false;
   const keyNumbers = [...source].filter((token) => /\d/.test(token) && !['4g', '5g', 'eu', 'gl'].includes(token));
   if (keyNumbers.some((token) => !target.has(token))) return false;
   return similarity(cleanReference, candidate) >= 0.5;
@@ -76,10 +80,11 @@ async function remoteFetch(url: string, baseUrl: string, init: RequestInit = {})
   throw lastError instanceof Error ? lastError : new Error('Prisjakt connection failed');
 }
 
-export async function searchProducts(query: string, country: CountryCode = 'SE'): Promise<Candidate[]> {
+export async function searchProducts(query: string, country: CountryCode = 'SE', referenceName?: string, allowProductId = true): Promise<Candidate[]> {
   const cleanQuery = query.trim(); if (!cleanQuery) return [];
   const config = COUNTRIES[country];
-  const directId = productIdFromUrl(cleanQuery, country);
+  const directId = allowProductId && !(cleanQuery.length >= 12 && isValidGtin(cleanQuery))
+    ? productIdFromUrl(cleanQuery, country) : null;
   if (directId) return [{ id: directId, name: `Prisjakt product ${directId}`, url: `${config.marketOrigin}/produkt.php?p=${directId}`, previewPrice: null, currency: config.currency, confidence: 100 }];
   const graphQuery = `query suggestions($query: String!) { searchSuggestions(query: $query) { ... on SuggestedProduct { __typename text id category price } } }`;
   const found = new Map<string, Record<string, unknown>>();
@@ -89,6 +94,10 @@ export async function searchProducts(query: string, country: CountryCode = 'SE')
     const payload = await response.json() as { data?: { searchSuggestions?: Array<Record<string, unknown>> } };
     for (const item of payload.data?.searchSuggestions ?? []) if (item.__typename === 'SuggestedProduct' && item.id && item.text) found.set(String(item.id), item);
     if (found.size >= 12) break;
+    if (referenceName) {
+      const plausible = [...found.values()].filter((item) => isPlausibleProductMatch(referenceName, String(item.text)));
+      if (plausible.length === 1) break;
+    }
   }
   return [...found.values()].map((item) => ({
     id: String(item.id), name: String(item.text), url: `${config.marketOrigin}/produkt.php?p=${item.id}`,
@@ -97,16 +106,43 @@ export async function searchProducts(query: string, country: CountryCode = 'SE')
   })).sort((a, b) => b.confidence - a.confidence).slice(0, 12);
 }
 
-export async function findMarketCandidates(input: { name: string; ean?: string; sku?: string }, country: CountryCode) {
-  const queries = [input.name, input.ean, input.sku].map((value) => String(value ?? '').trim()).filter(Boolean);
-  const found = new Map<string, Candidate>();
+function selectAutomaticMatch(reference: string, candidates: Candidate[]): Candidate | null {
+  const plausible = candidates.filter((candidate) => isPlausibleProductMatch(reference, candidate.name))
+    .map((candidate) => ({ ...candidate, confidence: Math.round(similarity(cleanReferenceTitle(reference), candidate.name) * 100) }))
+    .sort((a, b) => b.confidence - a.confidence);
+  const best = plausible[0];
+  // A search hit is not proof of an exact EAN: the public suggestions contain no GTIN.
+  if (!best || best.confidence < 50 || (plausible[1] && best.confidence - plausible[1].confidence < 8)) return null;
+  return best;
+}
+
+function isValidGtin(value: string) {
+  if (!/^(?:\d{8}|\d{12}|\d{13}|\d{14})$/.test(value)) return false;
+  const digits = [...value].map(Number);
+  const check = digits.pop();
+  const sum = digits.reverse().reduce((total, digit, index) => total + digit * (index % 2 ? 1 : 3), 0);
+  return (10 - sum % 10) % 10 === check;
+}
+
+export async function findMarketMatch(input: { name: string; ean?: string; sku?: string }, country: CountryCode): Promise<Candidate | null> {
+  const ean = String(input.ean ?? '').trim();
+  const sku = String(input.sku ?? '').trim();
+  const queries = [
+    isValidGtin(ean) ? ean : '',
+    input.name.trim(),
+    sku !== ean ? sku : '',
+  ].filter(Boolean);
+  let lastError: unknown; let succeeded = false;
   for (const query of queries) {
-    for (const candidate of await searchProducts(query, country)) {
-      if (!found.has(candidate.id)) found.set(candidate.id, { ...candidate, confidence: Math.round(similarity(input.name, candidate.name) * 100) });
-    }
-    if ([...found.values()].some((candidate) => isPlausibleProductMatch(input.name, candidate.name))) break;
+    try {
+      const candidates = await searchProducts(query, country, input.name, false);
+      succeeded = true;
+      const match = selectAutomaticMatch(input.name, candidates);
+      if (match) return match;
+    } catch (error) { lastError = error; }
   }
-  return [...found.values()].sort((a, b) => b.confidence - a.confidence);
+  if (!succeeded && lastError) throw lastError;
+  return null;
 }
 
 function unescapeJsonString(value: string) { try { return JSON.parse(`"${value}"`) as string; } catch { return value.replace(/\\u0026/g, '&').replace(/\\\//g, '/'); } }

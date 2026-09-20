@@ -1,7 +1,7 @@
 import { emptyCountryPrice, ensureSchema, getD1, getProduct, mapCountryPrice, recordRefresh, saveVariants, upsertCountryPrice } from '@/db/store';
 import { COUNTRIES, COUNTRY_CODES, type CountryCode } from '@/lib/countries';
 import { fetchMiStoreProduct, searchMiStore } from '@/lib/mistore';
-import { fetchOffers, findMarketCandidates, isPlausibleProductMatch } from '@/lib/prisjakt';
+import { fetchOffers, findMarketMatch, isPlausibleProductMatch } from '@/lib/prisjakt';
 
 export const runtime = 'edge';
 
@@ -54,12 +54,12 @@ async function refreshCountry(product: NonNullable<Awaited<ReturnType<typeof get
     product_name=CASE WHEN product_name='' OR product_name=sku OR product_name=ean THEN ? ELSE product_name END WHERE id=?`)
     .bind(mistore.sku, mistore.ean, mistore.name, product.id).run();
 
-  const candidates = withMiStore.marketProductId ? [] : await findMarketCandidates({ name: mistore.name, ean: mistore.ean || product.ean, sku: mistore.sku || product.sku }, country);
+  const candidate = withMiStore.marketProductId ? null : await findMarketMatch({ name: mistore.name, ean: mistore.ean || product.ean, sku: mistore.sku || product.sku }, country);
   const selected = withMiStore.marketProductId ? {
     id: withMiStore.marketProductId, name: withMiStore.marketProductName ?? mistore.name,
     url: withMiStore.marketProductUrl ?? `${COUNTRIES[country].marketOrigin}/produkt.php?p=${withMiStore.marketProductId}`,
     confidence: withMiStore.matchConfidence ?? 100,
-  } : candidates.find((candidate) => isPlausibleProductMatch(mistore.name, candidate.name));
+  } : candidate;
   if (!selected) { await recordRefresh(product.id, country, source, new Date().toISOString()); throw new Error(`${country}: No reliable Prisjakt match. Search by name, EAN, or product URL manually.`); }
   const offers = await fetchOffers(selected.id, country);
   const low = offers[0];
