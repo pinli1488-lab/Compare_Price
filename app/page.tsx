@@ -19,10 +19,13 @@ type Group = { key: string; primary: Product; members: Product[]; variants: Vari
 type MiStoreCandidate = { handle: string; name: string; url: string; priceMinor: number; currency: string; sku: string; ean: string; variantTitle: string; confidence: number };
 type MarketCandidate = { id: string; name: string; url: string; previewPrice: number | null; currency: string; confidence: number };
 type Collection = { handle: string; title: string; productHandles: string[]; updatedAt: string };
+type CollectionJob = { handle: string; title: string; phase: 'importing' | 'pricing' | 'complete'; total: number;
+  processed: number; imported: number; updated: number; priceProcessed: number; priceTotal: number; failed: number; priceErrors: number };
 type ActiveVariants = { key: string; variants: Variant[]; left: number; top: number; width: number };
 type Matrix = Array<Array<string | number | boolean | Date | null>>;
 type ApiPayload = { error?: string; products?: Product[]; mistoreCandidates?: MiStoreCandidate[]; marketCandidates?: MarketCandidate[];
-  errors?: Array<{ message: string }>; imported?: number; updated?: number; ids?: string[]; touchedIds?: string[]; collections?: Collection[]; collection?: Collection };
+  errors?: Array<{ message: string }>; imported?: number; updated?: number; ids?: string[]; touchedIds?: string[]; collections?: Collection[]; collection?: Collection;
+  processed?: number; failedHandles?: string[] };
 const currency: Record<Country, string> = { SE: 'SEK', DK: 'DKK', FI: 'EUR', NO: 'NOK' };
 const locale: Record<Country, string> = { SE: 'sv-SE', DK: 'da-DK', FI: 'fi-FI', NO: 'nb-NO' };
 const aliases = {
@@ -119,6 +122,8 @@ export default function Home() {
   const [query, setQuery] = useState(''); const [filter, setFilter] = useState('all'); const [filterCountry, setFilterCountry] = useState<Country | 'ALL'>('ALL');
   const [collections, setCollections] = useState<Collection[]>([]); const [collectionFilter, setCollectionFilter] = useState('ALL');
   const [collectionsOpen, setCollectionsOpen] = useState(false); const [collectionInput, setCollectionInput] = useState(''); const [collectionSaving, setCollectionSaving] = useState(false);
+  const [collectionJob, setCollectionJob] = useState<CollectionJob | null>(null); const [collectionJobHidden, setCollectionJobHidden] = useState(false);
+  const collectionSyncRef = useRef(false);
   const [page, setPage] = useState(1); const [selected, setSelected] = useState<Set<string>>(new Set()); const lastSelectedIndex = useRef<number | null>(null);
   const [refreshing, setRefreshing] = useState(false); const refreshingRef = useRef(false); const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [notice, setNotice] = useState(''); const [exportOpen, setExportOpen] = useState(false); const [importOpen, setImportOpen] = useState(false);
@@ -218,9 +223,13 @@ export default function Home() {
     const key = `${product.id}:${country}`; if (!(key in expectedDraft)) return;
     const input = expectedDraft[key]; const parsed = parsePrice(input);
     if (input.trim() && (!Number.isFinite(parsed) || parsed < 0)) return setNotice('Enter a valid expected price.');
-    const response = await fetch('/api/products', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: product.id, country, expectedPriceMinor: input.trim() ? Math.round(parsed * 100) : null }) });
+    const expectedPriceMinor = input.trim() ? Math.round(parsed * 100) : null;
+    const response = await fetch('/api/products', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: product.id, country, expectedPriceMinor }) });
     if (!response.ok) return setNotice('Could not save expected price.');
-    setExpectedDraft((draft) => { const next = { ...draft }; delete next[key]; return next; }); await loadProducts();
+    setProducts((current) => current.map((item) => item.id === product.id
+      ? { ...item, markets: { ...item.markets, [country]: { ...item.markets[country], expectedPriceMinor } } }
+      : item));
+    setExpectedDraft((draft) => { if (draft[key] !== input) return draft; const next = { ...draft }; delete next[key]; return next; });
   }
   async function lookup(source: 'mistore' | 'market', country: Country, value: string) {
     if (!value.trim()) return;
@@ -273,12 +282,68 @@ export default function Home() {
     } catch (error) { setNotice(error instanceof Error ? error.message : 'Search failed'); }
     finally { setManualLoading(false); }
   }
+  async function syncCollection(collection: Collection) {
+    if (collectionSyncRef.current) return setNotice('A collection is already syncing.');
+    collectionSyncRef.current = true; setCollectionJobHidden(false); setCollectionsOpen(false);
+    setFilter('all'); setCollectionFilter(collection.handle); setPage(1);
+    let processed = 0; let imported = 0; let updated = 0; let failed: string[] = []; let priceErrors = 0;
+    const touched = new Set<string>();
+    const progress = (phase: CollectionJob['phase'], priceProcessed = 0, priceTotal = 0) =>
+      setCollectionJob({ handle: collection.handle, title: collection.title, phase, total: collection.productHandles.length,
+        processed, imported, updated, priceProcessed, priceTotal, failed: failed.length, priceErrors });
+    progress('importing');
+    try {
+      const importChunk = async (body: { handle: string; offset?: number; handles?: string[] }) => {
+        const response = await fetch('/api/collections/import', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+        const data = await response.json() as ApiPayload;
+        if (!response.ok) throw new Error(data.error || 'Collection import failed');
+        imported += data.imported ?? 0; updated += data.updated ?? 0;
+        for (const id of data.ids ?? []) touched.add(id);
+        return data.failedHandles ?? [];
+      };
+      for (let offset = 0; offset < collection.productHandles.length; offset += 8) {
+        const handles = collection.productHandles.slice(offset, offset + 8);
+        try { failed.push(...await importChunk({ handle: collection.handle, offset })); }
+        catch { failed.push(...handles); }
+        processed += handles.length; progress('importing');
+        await loadProducts();
+      }
+      if (failed.length) {
+        const retry = failed; failed = [];
+        for (let index = 0; index < retry.length; index += 8) {
+          const handles = retry.slice(index, index + 8);
+          try { failed.push(...await importChunk({ handle: collection.handle, handles })); }
+          catch { failed.push(...handles); }
+          progress('importing');
+        }
+        await loadProducts();
+      }
+      const ids = [...touched]; progress('pricing', 0, ids.length);
+      for (let index = 0; index < ids.length; index += 1) {
+        const results = await Promise.all(ids.slice(index, index + 1).map(async (id) =>
+          Promise.all(COUNTRIES.map(async (country) => {
+            try {
+              const response = await fetch('/api/refresh', { method: 'POST', headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ ids: [id], country, source: 'manual' }) });
+              const data = await response.json() as ApiPayload;
+              return data.errors?.length ?? (response.ok ? 0 : 1);
+            } catch { return 1; }
+          }))));
+        priceErrors += results.flat(2).reduce((sum, count) => sum + count, 0);
+        progress('pricing', index + 1, ids.length);
+        if (index % 8 === 0 || index + 1 >= ids.length) await loadProducts();
+      }
+      progress('complete', ids.length, ids.length);
+    } catch (error) { progress('complete', 0, touched.size); setNotice(error instanceof Error ? error.message : 'Collection sync failed'); }
+    finally { collectionSyncRef.current = false; }
+  }
   async function saveCollection(input = collectionInput) {
-    if (!input.trim()) return; setCollectionSaving(true);
+    if (!input.trim() || collectionSyncRef.current) return; setCollectionSaving(true);
     try {
       const response = await fetch('/api/collections', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ url: input.trim() }) });
       const data = await response.json() as ApiPayload; if (!response.ok) throw new Error(data.error || 'Could not add collection');
-      setCollectionInput(''); await loadCollections(); setNotice(`${data.collection?.title || 'Collection'} updated with ${data.collection?.productHandles.length ?? 0} products.`);
+      setCollectionInput(''); await loadCollections();
+      if (data.collection) void syncCollection(data.collection);
     } catch (error) { setNotice(error instanceof Error ? error.message : 'Could not add collection'); }
     finally { setCollectionSaving(false); }
   }
@@ -382,7 +447,10 @@ export default function Home() {
             {group.variants.length > 1 ? <button type="button" className="variant-trigger" aria-expanded={activeVariants?.key === group.key} onPointerEnter={(event) => showVariants(event, group)} onPointerLeave={scheduleVariantClose} onFocus={(event) => showVariants(event, group)} onBlur={scheduleVariantClose} onClick={(event) => showVariants(event, group)}>Variants ({group.variants.length})</button> : <small>{product.ean || group.variants[0]?.ean || 'No EAN'}</small>}
           </td>
           {COUNTRIES.flatMap((country) => {
-            const market = product.markets[country]; const ownDiff = rangeDifference(group, country, market.lowPriceMinor); const expectedDiff = difference(market.expectedPriceMinor, market.lowPriceMinor); const key = `${product.id}:${country}`;
+            const market = product.markets[country]; const ownDiff = rangeDifference(group, country, market.lowPriceMinor); const key = `${product.id}:${country}`;
+            const draft = expectedDraft[key]; const draftPrice = draft?.trim() ? parsePrice(draft) : null;
+            const expectedPriceMinor = key in expectedDraft ? draftPrice != null && Number.isFinite(draftPrice) && draftPrice >= 0 ? Math.round(draftPrice * 100) : null : market.expectedPriceMinor;
+            const expectedDiff = difference(expectedPriceMinor, market.lowPriceMinor);
             const tooltip = `Manual: ${dateLabel(market.manualRefreshedAt)} | Automatic: ${dateLabel(market.autoRefreshedAt)}`;
             return [<td key={`${country}-own`} className="price-cell" title={tooltip}><a className="price-link" href={market.mistoreUrl || undefined} target="_blank" rel="noreferrer" title={priceRange(group, country)}>{priceRange(group, country)}</a><small className={ownDiff ? ownDiff.percentage > 0 ? 'bad' : 'good' : 'neutral'}>{ownDiff?.label ?? '—'}</small></td>,
               <td key={`${country}-market`} className="price-cell" title={tooltip}>{market.lowPriceMinor != null && market.marketProductUrl
@@ -394,10 +462,21 @@ export default function Home() {
       })}
     </tbody></table></section>
     {activeVariants && createPortal(<div className="variant-popover-floating" role="tooltip" style={{ left: activeVariants.left, top: activeVariants.top, width: activeVariants.width }} onPointerEnter={cancelVariantClose} onPointerLeave={scheduleVariantClose}>{activeVariants.variants.map((variant, index) => <div key={`${variant.sku}|${variant.ean}|${index}`}><strong>{variant.title || `Variant ${index + 1}`}</strong><span>SKU {variant.sku || '—'} · EAN {variant.ean || '—'}</span></div>)}</div>, document.body)}
+    {collectionJob && <aside className={`sync-progress ${collectionJobHidden ? 'collapsed' : ''}`} aria-live="polite">{collectionJobHidden
+      ? <button className="sync-show" onClick={() => setCollectionJobHidden(false)}>{collectionJob.phase === 'complete' ? 'Collection sync finished' : `Syncing ${collectionJob.title}`} · Show</button>
+      : <><div className="sync-progress-head"><strong>{collectionJob.title}</strong><button onClick={() => setCollectionJobHidden(true)}>Hide</button></div>
+        <p>{collectionJob.phase === 'importing' ? `Importing products: ${collectionJob.processed} / ${collectionJob.total}` : collectionJob.phase === 'pricing'
+          ? `Refreshing four-country prices: ${collectionJob.priceProcessed} / ${collectionJob.priceTotal}`
+          : `Complete: ${collectionJob.imported} added, ${collectionJob.updated} updated`}</p>
+        <progress value={collectionJob.phase === 'importing' ? collectionJob.processed : collectionJob.priceProcessed}
+          max={collectionJob.phase === 'importing' ? Math.max(1, collectionJob.total) : Math.max(1, collectionJob.priceTotal)}/>
+        {collectionJob.phase === 'complete' && <small>{collectionJob.failed ? `${collectionJob.failed} products could not be imported. ` : ''}{collectionJob.priceErrors ? `${collectionJob.priceErrors} country prices need review.` : 'All available prices checked.'}</small>}
+        {collectionJob.phase === 'complete' && <button className="sync-dismiss" onClick={() => setCollectionJob(null)}>Dismiss</button>}</>}
+    </aside>}
     {notice && <div className="toast"><span>{notice}</span><button onClick={() => setNotice('')} aria-label="Dismiss notification">×</button></div>}
     {collectionsOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setCollectionsOpen(false); }}><section className="modal collections-modal"><header><div><h2>Selected MiStore collections</h2><p>Add only the collections your team uses. Product membership comes from MiStore.se.</p></div><button className="close" onClick={() => setCollectionsOpen(false)}>Close</button></header>
-      <div className="manual-search"><input value={collectionInput} onChange={(event) => setCollectionInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void saveCollection(); }} placeholder="MiStore.se collection URL or handle"/><button className="button primary" onClick={() => void saveCollection()} disabled={collectionSaving}>{collectionSaving ? 'Reading…' : 'Add / refresh'}</button></div>
-      <div className="collection-list">{collections.length ? collections.map((collection) => <div key={collection.handle} className="collection-item"><div><strong>{collection.title}</strong><small>{collection.productHandles.length} products · Updated {dateLabel(collection.updatedAt)} Stockholm</small></div><div><button className="button" onClick={() => void saveCollection(collection.handle)} disabled={collectionSaving}>Refresh</button><button className="remove-match" onClick={() => void removeCollection(collection.handle)}>Remove</button></div></div>) : <p className="candidate-empty">No collections selected yet.</p>}</div>
+      <div className="manual-search"><input value={collectionInput} onChange={(event) => setCollectionInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void saveCollection(); }} placeholder="MiStore.se collection URL or handle"/><button className="button primary" onClick={() => void saveCollection()} disabled={collectionSaving || collectionSyncRef.current}>{collectionSaving ? 'Reading…' : 'Add / sync'}</button></div>
+      <div className="collection-list">{collections.length ? collections.map((collection) => <div key={collection.handle} className="collection-item"><div><strong>{collection.title}</strong><small>{collection.productHandles.length} products · Updated {dateLabel(collection.updatedAt)} Stockholm</small></div><div><button className="button" onClick={() => void saveCollection(collection.handle)} disabled={collectionSaving || collectionSyncRef.current}>Sync products</button><button className="remove-match" onClick={() => void removeCollection(collection.handle)} disabled={collectionSyncRef.current}>Remove</button></div></div>) : <p className="candidate-empty">No collections selected yet.</p>}</div>
     </section></div>}
     {importOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeImport(); }}><section className="modal import-modal"><header><div><h2>Import products</h2><p>Search MiStore by SKU, name, EAN, or product URL. Choose the correct product.</p></div><button className="close" onClick={closeImport}>Close</button></header>
       <div className="manual-search"><input value={manualQuery} onChange={(event) => setManualQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void searchManual(); }} placeholder="SKU, name, EAN or MiStore URL"/><button className="button primary" onClick={searchManual} disabled={manualLoading}>{manualLoading ? 'Searching…' : 'Search MiStore'}</button></div>

@@ -26,10 +26,12 @@
 - At a 1440 × 900 viewport, the table has white side gutters. Scrolling to the far right keeps the entire Match / Edit button inside the table and its right gutter.
 - Hovering the first product's Variants control shows all three variants with their color, SKU, and EAN in a viewport-level popup, with no clipping by the sticky product column or scrolling table.
 - The country selector remains a scope control for the Above market and Needs review status filters; all four country columns stay visible.
+- Editing Expected Price updates its percentage immediately from the draft value; saving keeps the same visible percentage without clearing the cell first.
+- The selected `sales` collection had 115 product handles when syncing began. Its progress panel advanced from 64/115 to four-country price refresh, and the collection-filtered table displayed 115 rows. Hiding the panel left the import running and kept the table usable.
 
 ## Remaining verification
 
-- The user has not supplied the specific MiStore collections to retain. The UI now accepts a collection URL or handle and stores only user-selected collections.
+- A past Error 1102 screenshot coincided with the large four-country refresh. Its exact CPU-versus-memory cause cannot be recovered from the screenshot alone; Workers Logs are now explicitly enabled for future diagnosis.
 - The user has not supplied an example of the earlier CSV/Excel export failure. Chromium download and structural checks passed for one selected group, including three variants.
 
 final result: passed for the implemented UI and interactions above
