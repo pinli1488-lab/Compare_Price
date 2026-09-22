@@ -18,7 +18,7 @@ jobs:
           const base = process.env.PRICE_DESK_URL?.replace(/\/$/, '');
           if (!base) throw new Error('Set the PRICE_DESK_URL repository variable first.');
           const lark = await fetch(`${base}/api/lark/sync`, { method: 'POST' });
-          if (!lark.ok) throw new Error(`Lark cost sync failed: ${lark.status} ${await lark.text()}`);
+          if (!lark.ok) console.warn(`Lark cost sync skipped: ${lark.status} ${await lark.text()}`);
           const selected = await fetch(`${base}/api/collections`);
           if (!selected.ok) throw new Error(`Collection list failed: ${selected.status}`);
           const { collections = [] } = await selected.json();
