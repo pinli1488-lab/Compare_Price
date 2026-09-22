@@ -1,17 +1,23 @@
 import { ensureSchema, getD1, mapProducts } from '@/db/store';
 import { isCountryCode } from '@/lib/countries';
+import { isLarkConfigured, writeExpectedPrices } from '@/lib/lark';
 
 export const runtime = 'edge';
 
 export async function GET() {
   await ensureSchema();
-  const [products, prices, variants] = await Promise.all([
+  const [products, prices, variants, costs, larkStatus] = await Promise.all([
     getD1().prepare('SELECT id,sku,product_name,ean,created_at FROM products ORDER BY created_at ASC, rowid ASC').all(),
     getD1().prepare(`SELECT p.*, l.manual_at, l.auto_at FROM product_country_prices p
       LEFT JOIN price_refresh_log l ON l.product_id=p.product_id AND l.country=p.country`).all(),
     getD1().prepare('SELECT * FROM product_variants').all(),
+    getD1().prepare('SELECT * FROM lark_product_costs').all(),
+    getD1().prepare("SELECT last_synced_at,last_error FROM integration_status WHERE integration='lark'").first(),
   ]);
-  return Response.json({ products: mapProducts(products.results as Record<string, unknown>[], prices.results as Record<string, unknown>[], variants.results as Record<string, unknown>[]) });
+  return Response.json({
+    products: mapProducts(products.results as Record<string, unknown>[], prices.results as Record<string, unknown>[], variants.results as Record<string, unknown>[], costs.results as Record<string, unknown>[]),
+    lark: { configured: isLarkConfigured(), lastSyncedAt: larkStatus?.last_synced_at ?? null, lastError: larkStatus?.last_error ?? null },
+  });
 }
 
 export async function POST(request: Request) {
@@ -51,14 +57,28 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   await ensureSchema();
-  const body = await request.json() as { id?: string; country?: string; expectedPriceMinor?: number | null };
+  const body = await request.json() as { id?: string; country?: string; expectedPriceMinor?: number | null; skus?: string[] };
   if (!body.id || !isCountryCode(body.country)) return Response.json({ error: 'Invalid product or country' }, { status: 400 });
   const value = body.expectedPriceMinor == null ? null : Math.round(Number(body.expectedPriceMinor));
   if (value != null && (!Number.isFinite(value) || value < 0)) return Response.json({ error: 'Invalid expected price' }, { status: 400 });
+  let larkWriteback: 'saved' | 'not_connected' | 'no_matching_sku' | 'partial' = 'not_connected';
+  let writebackErrors: string[] = [];
+  if (isLarkConfigured()) {
+    const normalized = [...new Set((body.skus ?? []).map((sku) => sku.trim().toLowerCase()).filter(Boolean))];
+    if (normalized.length) {
+      const placeholders = normalized.map(() => '?').join(',');
+      const records = await getD1().prepare(`SELECT record_id FROM lark_product_costs WHERE sku_normalized IN (${placeholders})`).bind(...normalized).all();
+      if (records.results.length) {
+        const results = await writeExpectedPrices(body.country, value, records.results.map((row) => String(row.record_id)));
+        writebackErrors = results.filter((result) => !result.ok).map((result) => result.error ?? result.recordId);
+        larkWriteback = writebackErrors.length ? 'partial' : 'saved';
+      } else larkWriteback = 'no_matching_sku';
+    } else larkWriteback = 'no_matching_sku';
+  }
   await getD1().prepare(`INSERT INTO product_country_prices (product_id,country,currency,expected_price_minor)
     VALUES (?,?,?,?) ON CONFLICT(product_id,country) DO UPDATE SET expected_price_minor=excluded.expected_price_minor`)
     .bind(body.id, body.country, body.country === 'FI' ? 'EUR' : body.country === 'DK' ? 'DKK' : body.country === 'NO' ? 'NOK' : 'SEK', value).run();
-  return Response.json({ saved: true });
+  return Response.json({ saved: true, larkWriteback, writebackErrors });
 }
 
 export async function DELETE(request: Request) {

@@ -12,9 +12,16 @@ export type CountryPriceRecord = {
   expectedPriceMinor: number | null; updatedAt: string | null; manualRefreshedAt: string | null; autoRefreshedAt: string | null;
 };
 export type ProductVariant = { sku: string; ean: string; title: string; priceMinor: number };
+export type LarkCostRecord = {
+  sku: string; recordId: string; status: 'ok' | 'duplicate'; costSekMinor: number | null;
+  warehouseSekMinor: number | null; seLogisticsSekMinor: number | null; dkLogisticsSekMinor: number | null;
+  fiLogisticsSekMinor: number | null; noLogisticsSekMinor: number | null; chemicalTaxSeSekMinor: number | null;
+  copySweSekMinor: number | null; copyDkSekMinor: number | null; fixedFeeSekMinor: number | null;
+  rabattSekMinor: number | null; updatedAt: string;
+};
 export type ProductRecord = {
   id: string; sku: string; productName: string; ean: string; createdAt: string;
-  markets: Record<CountryCode, CountryPriceRecord>; variants: Record<CountryCode, ProductVariant[]>;
+  markets: Record<CountryCode, CountryPriceRecord>; variants: Record<CountryCode, ProductVariant[]>; larkCosts: Record<string, LarkCostRecord>;
 };
 
 let initialized = false;
@@ -61,6 +68,16 @@ export async function ensureSchema() {
       handle TEXT PRIMARY KEY, title TEXT NOT NULL, product_handles_json TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS lark_product_costs (
+      record_id TEXT PRIMARY KEY, sku TEXT NOT NULL, sku_normalized TEXT NOT NULL,
+      cost_sek_minor INTEGER, warehouse_sek_minor INTEGER,
+      se_logistics_sek_minor INTEGER, dk_logistics_sek_minor INTEGER, fi_logistics_sek_minor INTEGER, no_logistics_sek_minor INTEGER,
+      chemical_tax_se_sek_minor INTEGER, copy_swe_sek_minor INTEGER, copy_dk_sek_minor INTEGER,
+      fixed_fee_sek_minor INTEGER, rabatt_sek_minor INTEGER, updated_at TEXT NOT NULL
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS integration_status (
+      integration TEXT PRIMARY KEY, last_synced_at TEXT, last_error TEXT
+    )`),
     db.prepare(`INSERT OR IGNORE INTO product_country_prices (
       product_id,country,currency,market_product_id,market_product_name,market_product_url,
       match_confidence,match_status
@@ -70,6 +87,7 @@ export async function ensureSchema() {
       WHERE mistore_handle IS NULL AND (low_price_minor IS NOT NULL OR low_merchant IS NOT NULL OR low_url IS NOT NULL)`),
     db.prepare('CREATE INDEX IF NOT EXISTS idx_country_prices_updated ON product_country_prices(updated_at)'),
     db.prepare('CREATE INDEX IF NOT EXISTS idx_country_prices_status ON product_country_prices(match_status)'),
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_lark_costs_sku ON lark_product_costs(sku_normalized)'),
   ]);
   initialized = true;
 }
@@ -110,7 +128,7 @@ export function mapCountryPrice(row: Record<string, unknown>): CountryPriceRecor
   };
 }
 
-export function mapProducts(productRows: Record<string, unknown>[], countryRows: Record<string, unknown>[], variantRows: Record<string, unknown>[] = []): ProductRecord[] {
+export function mapProducts(productRows: Record<string, unknown>[], countryRows: Record<string, unknown>[], variantRows: Record<string, unknown>[] = [], costRows: Record<string, unknown>[] = []): ProductRecord[] {
   const countriesByProduct = new Map<string, Record<CountryCode, CountryPriceRecord>>();
   const variantsByProduct = new Map<string, Record<CountryCode, ProductVariant[]>>();
   for (const row of variantRows) {
@@ -128,11 +146,33 @@ export function mapProducts(productRows: Record<string, unknown>[], countryRows:
     const markets = countriesByProduct.get(productId) ?? Object.fromEntries(COUNTRY_CODES.map((code) => [code, emptyCountryPrice(code)])) as Record<CountryCode, CountryPriceRecord>;
     markets[country] = mapCountryPrice(row); countriesByProduct.set(productId, markets);
   }
-  return productRows.map((row) => ({
-    id: String(row.id), sku: String(row.sku ?? ''), productName: String(row.product_name), ean: String(row.ean ?? ''), createdAt: String(row.created_at),
-    markets: countriesByProduct.get(String(row.id)) ?? Object.fromEntries(COUNTRY_CODES.map((code) => [code, emptyCountryPrice(code)])) as Record<CountryCode, CountryPriceRecord>,
-    variants: variantsByProduct.get(String(row.id)) ?? Object.fromEntries(COUNTRY_CODES.map((code) => [code, []])) as unknown as Record<CountryCode, ProductVariant[]>,
+  const costGroups = new Map<string, Record<string, unknown>[]>();
+  for (const row of costRows) {
+    const normalized = String(row.sku_normalized ?? '');
+    const group = costGroups.get(normalized) ?? []; group.push(row); costGroups.set(normalized, group);
+  }
+  const mapCosts = (skus: string[]) => Object.fromEntries(skus.flatMap((sku) => {
+    const normalized = sku.trim().toLowerCase(); if (!normalized) return [];
+    const rows = costGroups.get(normalized) ?? []; if (!rows.length) return [];
+    const row = rows[0]; const minor = (name: string) => row[name] == null ? null : Number(row[name]);
+    return [[normalized, {
+      sku, recordId: String(row.record_id), status: rows.length > 1 ? 'duplicate' : 'ok', costSekMinor: minor('cost_sek_minor'),
+      warehouseSekMinor: minor('warehouse_sek_minor'), seLogisticsSekMinor: minor('se_logistics_sek_minor'),
+      dkLogisticsSekMinor: minor('dk_logistics_sek_minor'), fiLogisticsSekMinor: minor('fi_logistics_sek_minor'),
+      noLogisticsSekMinor: minor('no_logistics_sek_minor'), chemicalTaxSeSekMinor: minor('chemical_tax_se_sek_minor'),
+      copySweSekMinor: minor('copy_swe_sek_minor'), copyDkSekMinor: minor('copy_dk_sek_minor'),
+      fixedFeeSekMinor: minor('fixed_fee_sek_minor'), rabattSekMinor: minor('rabatt_sek_minor'), updatedAt: String(row.updated_at),
+    } satisfies LarkCostRecord]];
   }));
+  return productRows.map((row) => {
+    const productId = String(row.id);
+    const variants = variantsByProduct.get(productId) ?? Object.fromEntries(COUNTRY_CODES.map((code) => [code, []])) as unknown as Record<CountryCode, ProductVariant[]>;
+    const skus = [String(row.sku ?? ''), ...COUNTRY_CODES.flatMap((country) => variants[country].map((variant) => variant.sku))];
+    return ({
+    id: String(row.id), sku: String(row.sku ?? ''), productName: String(row.product_name), ean: String(row.ean ?? ''), createdAt: String(row.created_at),
+    markets: countriesByProduct.get(productId) ?? Object.fromEntries(COUNTRY_CODES.map((code) => [code, emptyCountryPrice(code)])) as Record<CountryCode, CountryPriceRecord>,
+    variants, larkCosts: mapCosts(skus),
+  }); });
 }
 
 export async function saveVariants(productId: string, country: CountryCode, variants: ProductVariant[]) {

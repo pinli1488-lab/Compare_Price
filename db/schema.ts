@@ -52,3 +52,17 @@ export const selectedCollections = sqliteTable('selected_collections', {
   handle: text('handle').primaryKey(), title: text('title').notNull(),
   productHandlesJson: text('product_handles_json').notNull(), updatedAt: text('updated_at').notNull(),
 });
+
+export const larkProductCosts = sqliteTable('lark_product_costs', {
+  recordId: text('record_id').primaryKey(), sku: text('sku').notNull(), skuNormalized: text('sku_normalized').notNull(),
+  costSekMinor: integer('cost_sek_minor'), warehouseSekMinor: integer('warehouse_sek_minor'),
+  seLogisticsSekMinor: integer('se_logistics_sek_minor'), dkLogisticsSekMinor: integer('dk_logistics_sek_minor'),
+  fiLogisticsSekMinor: integer('fi_logistics_sek_minor'), noLogisticsSekMinor: integer('no_logistics_sek_minor'),
+  chemicalTaxSeSekMinor: integer('chemical_tax_se_sek_minor'), copySweSekMinor: integer('copy_swe_sek_minor'),
+  copyDkSekMinor: integer('copy_dk_sek_minor'), fixedFeeSekMinor: integer('fixed_fee_sek_minor'),
+  rabattSekMinor: integer('rabatt_sek_minor'), updatedAt: text('updated_at').notNull(),
+}, (table) => [index('idx_lark_costs_sku').on(table.skuNormalized)]);
+
+export const integrationStatus = sqliteTable('integration_status', {
+  integration: text('integration').primaryKey(), lastSyncedAt: text('last_synced_at'), lastError: text('last_error'),
+});

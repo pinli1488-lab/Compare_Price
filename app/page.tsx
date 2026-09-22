@@ -7,6 +7,12 @@ import readXlsxFile from 'read-excel-file';
 const COUNTRIES = ['SE', 'DK', 'FI', 'NO'] as const;
 type Country = typeof COUNTRIES[number];
 type Variant = { sku: string; ean: string; title: string; priceMinor: number };
+type LarkCost = {
+  sku: string; recordId: string; status: 'ok' | 'duplicate'; costSekMinor: number | null; warehouseSekMinor: number | null;
+  seLogisticsSekMinor: number | null; dkLogisticsSekMinor: number | null; fiLogisticsSekMinor: number | null;
+  noLogisticsSekMinor: number | null; chemicalTaxSeSekMinor: number | null; copySweSekMinor: number | null;
+  copyDkSekMinor: number | null; fixedFeeSekMinor: number | null; rabattSekMinor: number | null; updatedAt: string;
+};
 type Market = {
   currency: string; mistoreHandle: string | null; mistoreName: string | null; mistoreUrl: string | null;
   mistorePriceMinor: number | null; marketProductId: string | null; marketProductName: string | null;
@@ -14,20 +20,24 @@ type Market = {
   secondLowPriceMinor: number | null; secondLowMerchant: string | null;
   expectedPriceMinor: number | null; updatedAt: string | null; manualRefreshedAt: string | null; autoRefreshedAt: string | null;
 };
-type Product = { id: string; sku: string; productName: string; ean: string; createdAt: string; markets: Record<Country, Market>; variants: Record<Country, Variant[]> };
+type Product = { id: string; sku: string; productName: string; ean: string; createdAt: string; markets: Record<Country, Market>; variants: Record<Country, Variant[]>; larkCosts: Record<string, LarkCost> };
 type Group = { key: string; primary: Product; members: Product[]; variants: Variant[] };
 type MiStoreCandidate = { handle: string; name: string; url: string; priceMinor: number; currency: string; sku: string; ean: string; variantTitle: string; confidence: number };
 type MarketCandidate = { id: string; name: string; url: string; previewPrice: number | null; currency: string; confidence: number };
 type Collection = { handle: string; title: string; productHandles: string[]; updatedAt: string };
 type CollectionJob = { handle: string; title: string; phase: 'importing' | 'pricing' | 'complete'; total: number;
   processed: number; imported: number; updated: number; priceProcessed: number; priceTotal: number; failed: number; priceErrors: number };
-type ActiveVariants = { key: string; variants: Variant[]; left: number; top: number; width: number };
+type ActiveVariants = { key: string; variants: Variant[]; costs: Record<string, LarkCost>; markets: Record<Country, Market>; left: number; top: number; width: number };
 type Matrix = Array<Array<string | number | boolean | Date | null>>;
 type ApiPayload = { error?: string; products?: Product[]; mistoreCandidates?: MiStoreCandidate[]; marketCandidates?: MarketCandidate[];
   errors?: Array<{ message: string }>; imported?: number; updated?: number; ids?: string[]; touchedIds?: string[]; collections?: Collection[]; collection?: Collection;
-  processed?: number; failedHandles?: string[] };
+  processed?: number; failedHandles?: string[]; lark?: LarkStatus; synced?: number; duplicateRows?: number;
+  larkWriteback?: string; writebackErrors?: string[] };
+type LarkStatus = { configured: boolean; lastSyncedAt: string | null; lastError: string | null };
 const currency: Record<Country, string> = { SE: 'SEK', DK: 'DKK', FI: 'EUR', NO: 'NOK' };
 const locale: Record<Country, string> = { SE: 'sv-SE', DK: 'da-DK', FI: 'fi-FI', NO: 'nb-NO' };
+const larkRate: Record<Country, number> = { SE: 1, DK: 1.48, FI: 11.07, NO: 1 };
+const vatRate: Record<Country, number> = { SE: 1.25, DK: 1.25, FI: 1.255, NO: 1.25 };
 const aliases = {
   sku: ['sku', 'artikelnummer', 'item number', 'product id', 'product code', '产品编号'],
   name: ['product name', 'title', 'produktnamn', 'product', 'name', '产品名称', '商品名称'],
@@ -89,6 +99,39 @@ function difference(own: number | null, market: number | null) {
   const percentage = (own - market) / market * 100;
   return { percentage, label: `${percentage > 0 ? '+' : ''}${percentage.toFixed(1)}%` };
 }
+function productCosts(group: Group) {
+  const records = new Map<string, LarkCost>();
+  for (const member of group.members) for (const [sku, record] of Object.entries(member.larkCosts ?? {})) records.set(sku, record);
+  return records;
+}
+function convertedCost(costSekMinor: number, country: Country) { return Math.round(costSekMinor / larkRate[country]); }
+function expectedProfit(record: LarkCost, country: Country, expectedPriceMinor: number | null) {
+  if (record.status !== 'ok' || record.costSekMinor == null || expectedPriceMinor == null || expectedPriceMinor <= 0) return null;
+  const logistics = country === 'SE' ? record.seLogisticsSekMinor : country === 'DK' ? record.dkLogisticsSekMinor : country === 'FI' ? record.fiLogisticsSekMinor : record.noLogisticsSekMinor;
+  if ([record.warehouseSekMinor, logistics, record.fixedFeeSekMinor, record.rabattSekMinor].some((value) => value == null)) return null;
+  const grossSek = expectedPriceMinor * larkRate[country];
+  let profit = grossSek / vatRate[country] - record.costSekMinor - record.warehouseSekMinor! - logistics! - record.fixedFeeSekMinor! + record.rabattSekMinor! - grossSek * 0.03;
+  if (country === 'SE') profit -= (record.chemicalTaxSeSekMinor ?? 0) + (record.copySweSekMinor ?? 0);
+  if (country === 'DK') profit -= record.copyDkSekMinor ?? 0;
+  return { profitMinor: country === 'DK' || country === 'FI' ? Math.round(profit / 100) * 100 : Math.round(profit / 10) * 10, margin: profit / grossSek * 100 };
+}
+function groupCostRange(group: Group, country: Country) {
+  const all = [...productCosts(group).values()];
+  const valid = all.filter((record) => record.status === 'ok' && record.costSekMinor != null);
+  if (!valid.length) return { label: '—', note: all.some((record) => record.status === 'duplicate') ? 'Duplicate SKU in Lark' : 'Missing cost' };
+  const values = valid.map((record) => convertedCost(record.costSekMinor!, country));
+  const low = Math.min(...values); const high = Math.max(...values);
+  return { label: low === high ? money(low, country) : `${money(low, country)} – ${money(high, country)}`, note: valid.length === all.length ? 'Purchase cost' : `${valid.length}/${all.length} SKUs` };
+}
+function groupProfitRange(group: Group, country: Country, expectedPriceMinor: number | null) {
+  const values = [...productCosts(group).values()].map((record) => expectedProfit(record, country, expectedPriceMinor)).filter((value): value is NonNullable<typeof value> => value != null);
+  if (!values.length) return null;
+  const profits = values.map((value) => value.profitMinor); const margins = values.map((value) => value.margin);
+  const lowProfit = Math.min(...profits); const highProfit = Math.max(...profits); const lowMargin = Math.min(...margins); const highMargin = Math.max(...margins);
+  const amount = lowProfit === highProfit ? money(lowProfit, 'SE') : `${money(lowProfit, 'SE')} – ${money(highProfit, 'SE')}`;
+  const margin = Math.round(lowMargin) === Math.round(highMargin) ? `${Math.round(lowMargin)}%` : `${Math.round(lowMargin)}% – ${Math.round(highMargin)}%`;
+  return `${amount} · ${margin}`;
+}
 function dateLabel(value: string | null) {
   if (!value) return 'Never';
   return new Intl.DateTimeFormat('en-GB', { dateStyle: 'short', timeStyle: 'short', timeZone: 'Europe/Stockholm' }).format(new Date(value));
@@ -136,11 +179,12 @@ export default function Home() {
   const [columns, setColumns] = useState({ sku: -1, name: -1, ean: -1 }); const [pasteText, setPasteText] = useState('');
   const [expectedDraft, setExpectedDraft] = useState<Record<string, string>>({}); const fileRef = useRef<HTMLInputElement>(null);
   const [activeVariants, setActiveVariants] = useState<ActiveVariants | null>(null);
+  const [lark, setLark] = useState<LarkStatus>({ configured: false, lastSyncedAt: null, lastError: null }); const [larkSyncing, setLarkSyncing] = useState(false);
   const variantCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadProducts = useCallback(async () => {
     const response = await fetch('/api/products', { cache: 'no-store' }); const data = await response.json() as ApiPayload;
-    if (!response.ok) throw new Error(data.error || 'Could not load products'); setProducts(data.products ?? []);
+    if (!response.ok) throw new Error(data.error || 'Could not load products'); setProducts(data.products ?? []); if (data.lark) setLark(data.lark);
   }, []);
   const loadCollections = useCallback(async () => {
     const response = await fetch('/api/collections', { cache: 'no-store' }); const data = await response.json() as ApiPayload;
@@ -159,7 +203,7 @@ export default function Home() {
     const rect = event.currentTarget.getBoundingClientRect();
     const width = Math.min(420, window.innerWidth - 32);
     const height = Math.min(290, 44 + group.variants.length * 44);
-    setActiveVariants({ key: group.key, variants: group.variants,
+    setActiveVariants({ key: group.key, variants: group.variants, costs: Object.fromEntries(productCosts(group)), markets: group.primary.markets,
       left: Math.max(16, Math.min(rect.right + 10, window.innerWidth - width - 16)),
       top: Math.max(16, Math.min(rect.top, window.innerHeight - height - 16)), width });
   }
@@ -219,17 +263,33 @@ export default function Home() {
       if (!quiet) setNotice(errors ? `Refresh finished. ${errors} country matches need review.` : `Updated ${unique.length} products.`);
     } finally { refreshingRef.current = false; setRefreshing(false); }
   }, [loadProducts]);
-  async function saveExpected(product: Product, country: Country) {
+  async function saveExpected(group: Group, country: Country) {
+    const product = group.primary;
     const key = `${product.id}:${country}`; if (!(key in expectedDraft)) return;
     const input = expectedDraft[key]; const parsed = parsePrice(input);
     if (input.trim() && (!Number.isFinite(parsed) || parsed < 0)) return setNotice('Enter a valid expected price.');
     const expectedPriceMinor = input.trim() ? Math.round(parsed * 100) : null;
-    const response = await fetch('/api/products', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: product.id, country, expectedPriceMinor }) });
-    if (!response.ok) return setNotice('Could not save expected price.');
+    const skus = [...new Set([product.sku, ...group.variants.map((variant) => variant.sku)].filter(Boolean))];
+    const response = await fetch('/api/products', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: product.id, country, expectedPriceMinor, skus }) });
+    const data = await response.json() as ApiPayload;
+    if (!response.ok) return setNotice(data.error || 'Could not save expected price.');
     setProducts((current) => current.map((item) => item.id === product.id
       ? { ...item, markets: { ...item.markets, [country]: { ...item.markets[country], expectedPriceMinor } } }
       : item));
     setExpectedDraft((draft) => { if (draft[key] !== input) return draft; const next = { ...draft }; delete next[key]; return next; });
+    if (data.larkWriteback === 'saved') setNotice(`Expected price saved to Lark for ${skus.length} SKU${skus.length === 1 ? '' : 's'}.`);
+    else if (data.larkWriteback === 'partial') setNotice('Saved locally, but some Lark rows could not be updated.');
+    else if (data.larkWriteback === 'no_matching_sku') setNotice('Saved locally. No matching SKU row was found in Lark.');
+    else setNotice('Saved locally. Connect Lark to enable writeback.');
+  }
+  async function syncLark() {
+    if (larkSyncing) return; setLarkSyncing(true);
+    try {
+      const response = await fetch('/api/lark/sync', { method: 'POST' }); const data = await response.json() as ApiPayload;
+      if (!response.ok) throw new Error(data.error || 'Lark sync failed');
+      await loadProducts(); setNotice(`Synced ${data.synced ?? 0} Lark rows${data.duplicateRows ? `; ${data.duplicateRows} duplicate SKU rows need review` : ''}.`);
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'Lark sync failed'); }
+    finally { setLarkSyncing(false); }
   }
   async function lookup(source: 'mistore' | 'market', country: Country, value: string) {
     if (!value.trim()) return;
@@ -416,9 +476,11 @@ export default function Home() {
         const countryVariant = group.members.flatMap((member) => member.variants[country] ?? [])
           .find((item) => (variant.sku && item.sku === variant.sku) || (variant.ean && item.ean === variant.ean));
         const mistorePrice = countryVariant?.priceMinor ?? market.mistorePriceMinor;
+        const larkCost = productCosts(group).get(variant.sku.trim().toLowerCase());
         return [mistorePrice == null ? '' : mistorePrice / 100, market.lowPriceMinor == null ? '' : market.lowPriceMinor / 100,
           market.secondLowPriceMinor == null ? '' : market.secondLowPriceMinor / 100,
-          market.expectedPriceMinor == null ? '' : market.expectedPriceMinor / 100, ''];
+          market.expectedPriceMinor == null ? '' : market.expectedPriceMinor / 100,
+          larkCost?.status === 'ok' && larkCost.costSekMinor != null ? convertedCost(larkCost.costSekMinor, country) / 100 : ''];
       });
       const sources = COUNTRIES.flatMap((country) => {
         const market = group.primary.markets[country];
@@ -435,6 +497,7 @@ export default function Home() {
   return <main className="app-shell">
     <header className="topbar"><div className="brand"><span className="brand-mark">P</span><strong>PriceDesk</strong></div><div className="topbar-actions">
       <button className="button" onClick={() => setCollectionsOpen(true)}>Collections</button>
+      <button className="button" onClick={() => void syncLark()} disabled={larkSyncing || !lark.configured}>{larkSyncing ? 'Syncing Lark…' : 'Sync Lark costs'}</button>
       <button className="button" onClick={exportCsv} disabled={!selectedGroups.length}>Export CSV ({selectedGroups.length})</button>
       <button className="button primary" onClick={() => setImportOpen(true)}>Import products</button>
     </div></header>
@@ -446,7 +509,7 @@ export default function Home() {
       <button className="button" disabled={refreshing || !selected.size} onClick={() => void refreshIds([...selected])}>{refreshing ? `Refreshing ${progress.done}/${progress.total}` : `Refresh selected (${selectedGroups.length})`}</button>
       {selected.size > 0 && <button className="button" onClick={() => { setSelected(new Set()); lastSelectedIndex.current = null; }}>Clear selection</button>}
       {selected.size > 0 && <button className="delete-button" onClick={deleteSelected}>Delete selected</button>}
-      <div className="toolbar-meta"><span>Manual (Stockholm): {dateLabel(lastManual)}</span><span>Automatic (Stockholm): {dateLabel(lastAuto)}</span></div>
+      <div className="toolbar-meta"><span>Lark: {lark.configured ? dateLabel(lark.lastSyncedAt) : 'Not connected'}</span><span>Manual (Stockholm): {dateLabel(lastManual)}</span><span>Automatic (Stockholm): {dateLabel(lastAuto)}</span></div>
       <div className="pager"><span>{filtered.length ? `${(safePage - 1) * 50 + 1}–${Math.min(safePage * 50, filtered.length)}` : '0'} / {filtered.length}</span><button disabled={safePage <= 1} onClick={() => setPage(safePage - 1)} aria-label="Previous page">‹</button><span>{safePage} / {pageCount}</span><button disabled={safePage >= pageCount} onClick={() => setPage(safePage + 1)} aria-label="Next page">›</button></div>
     </section>
     <section className="grid-wrap" onScrollCapture={() => setActiveVariants(null)}><table className="price-grid"><colgroup><col style={{ width: 36 }}/><col style={{ width: 235 }}/>{COUNTRIES.flatMap((country) => [<col key={`${country}-own`} style={{ width: 145 }}/>, <col key={`${country}-market`} style={{ width: 145 }}/>, <col key={`${country}-second`} style={{ width: 145 }}/>, <col key={`${country}-expected`} style={{ width: 145 }}/>, <col key={`${country}-cost`} style={{ width: 145 }}/>])}<col style={{ width: 126 }}/></colgroup><thead><tr>
@@ -464,6 +527,7 @@ export default function Home() {
             const draft = expectedDraft[key]; const draftPrice = draft?.trim() ? parsePrice(draft) : null;
             const expectedPriceMinor = key in expectedDraft ? draftPrice != null && Number.isFinite(draftPrice) && draftPrice >= 0 ? Math.round(draftPrice * 100) : null : market.expectedPriceMinor;
             const expectedDiff = difference(expectedPriceMinor, market.lowPriceMinor);
+            const profit = groupProfitRange(group, country, expectedPriceMinor); const cost = groupCostRange(group, country);
             const tooltip = `Manual: ${dateLabel(market.manualRefreshedAt)} | Automatic: ${dateLabel(market.autoRefreshedAt)}`;
             return [<td key={`${country}-own`} className="price-cell" title={tooltip}><a className="price-link" href={market.mistoreUrl || undefined} target="_blank" rel="noreferrer" title={priceRange(group, country)}>{priceRange(group, country)}</a><small className={ownDiff ? ownDiff.percentage > 0 ? 'bad' : 'good' : 'neutral'}>{ownDiff?.label ?? '—'}</small></td>,
               <td key={`${country}-market`} className="price-cell" title={tooltip}>{market.lowPriceMinor != null && market.marketProductUrl
@@ -472,13 +536,16 @@ export default function Home() {
               <td key={`${country}-second`} className="price-cell" title={tooltip}>{market.secondLowPriceMinor != null && market.marketProductUrl
                 ? <a className="price-link" href={market.marketProductUrl} target="_blank" rel="noreferrer">{money(market.secondLowPriceMinor, country)}</a>
                 : <span className="price-link">—</span>}<small className="merchant" title={market.secondLowMerchant ?? ''}>{market.secondLowMerchant || 'Not available'}</small></td>,
-              <td key={`${country}-expected`} className="price-cell expected-cell"><input aria-label={`${country} Expected Price for product ${numbers.get(group.key)}`} value={key in expectedDraft ? expectedDraft[key] : market.expectedPriceMinor == null ? '' : String(market.expectedPriceMinor / 100)} onChange={(event) => setExpectedDraft((draft) => ({ ...draft, [key]: event.target.value }))} onBlur={() => void saveExpected(product, country)} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }} placeholder="—"/><small className={expectedDiff ? expectedDiff.percentage > 0 ? 'bad' : 'good' : 'neutral'}>{expectedDiff?.label ?? '—'}</small></td>,
-              <td key={`${country}-cost`} className="price-cell"><span className="price-link">—</span><small className="neutral">—</small></td>];
+              <td key={`${country}-expected`} className="price-cell expected-cell"><input aria-label={`${country} Expected Price for product ${numbers.get(group.key)}`} value={key in expectedDraft ? expectedDraft[key] : market.expectedPriceMinor == null ? '' : String(market.expectedPriceMinor / 100)} onChange={(event) => setExpectedDraft((draft) => ({ ...draft, [key]: event.target.value }))} onBlur={() => void saveExpected(group, country)} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }} placeholder="—"/><small className={expectedDiff ? expectedDiff.percentage > 0 ? 'bad' : 'good' : 'neutral'}>{expectedDiff?.label ?? '—'}</small><small className={profit?.startsWith('-') ? 'bad profit-line' : profit ? 'good profit-line' : 'neutral profit-line'}>{profit ?? 'Profit unavailable'}</small></td>,
+              <td key={`${country}-cost`} className="price-cell"><span className="price-link no-link">{cost.label}</span><small className="neutral">{cost.note}</small></td>];
           })}<td className="action-cell"><button className="match-button" onClick={() => openMatch(product)}>Match / Edit</button></td>
         </tr>;
       })}
     </tbody></table></section>
-    {activeVariants && createPortal(<div className="variant-popover-floating" role="tooltip" style={{ left: activeVariants.left, top: activeVariants.top, width: activeVariants.width }} onPointerEnter={cancelVariantClose} onPointerLeave={scheduleVariantClose}>{activeVariants.variants.map((variant, index) => <div key={`${variant.sku}|${variant.ean}|${index}`}><strong>{variant.title || `Variant ${index + 1}`}</strong><span>SKU {variant.sku || '—'} · EAN {variant.ean || '—'}</span></div>)}</div>, document.body)}
+    {activeVariants && createPortal(<div className="variant-popover-floating" role="tooltip" style={{ left: activeVariants.left, top: activeVariants.top, width: activeVariants.width }} onPointerEnter={cancelVariantClose} onPointerLeave={scheduleVariantClose}>{activeVariants.variants.map((variant, index) => {
+      const cost = activeVariants.costs[variant.sku.trim().toLowerCase()];
+      return <div key={`${variant.sku}|${variant.ean}|${index}`}><strong>{variant.title || `Variant ${index + 1}`}</strong><span>SKU {variant.sku || '—'} · EAN {variant.ean || '—'}</span><span>{cost?.status === 'ok' && cost.costSekMinor != null ? `Cost ${money(cost.costSekMinor, 'SE')}` : cost?.status === 'duplicate' ? 'Duplicate SKU in Lark' : 'Cost missing in Lark'}</span><span>{COUNTRIES.map((country) => { const result = cost ? expectedProfit(cost, country, activeVariants.markets[country].expectedPriceMinor) : null; return `${country} ${result ? `${money(result.profitMinor, 'SE')} / ${Math.round(result.margin)}%` : '—'}`; }).join(' · ')}</span></div>;
+    })}</div>, document.body)}
     {collectionJob && <aside className={`sync-progress ${collectionJobHidden ? 'collapsed' : ''}`} aria-live="polite">{collectionJobHidden
       ? <button className="sync-show" onClick={() => setCollectionJobHidden(false)}>{collectionJob.phase === 'complete' ? 'Collection sync finished' : `Syncing ${collectionJob.title}`} · Show</button>
       : <><div className="sync-progress-head"><strong>{collectionJob.title}</strong><button onClick={() => setCollectionJobHidden(true)}>Hide</button></div>
