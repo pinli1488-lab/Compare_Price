@@ -30,7 +30,7 @@ async function refreshCountry(product: NonNullable<Awaited<ReturnType<typeof get
       marketProductId: marketStillValid ? current.marketProductId : null,
       marketProductName: marketStillValid ? current.marketProductName : null,
       marketProductUrl: marketStillValid ? current.marketProductUrl : null,
-      lowPriceMinor: null, lowMerchant: null, lowUrl: null, matchStatus: 'pending' });
+      lowPriceMinor: null, lowMerchant: null, lowUrl: null, secondLowPriceMinor: null, secondLowMerchant: null, matchStatus: 'pending' });
     await recordRefresh(product.id, country, source, new Date().toISOString());
     throw new Error(`${country}: No reliable MiStore match. Select a product manually.`);
   }
@@ -46,6 +46,8 @@ async function refreshCountry(product: NonNullable<Awaited<ReturnType<typeof get
     lowPriceMinor: oldMarketValid ? current.lowPriceMinor : null,
     lowMerchant: oldMarketValid ? current.lowMerchant : null,
     lowUrl: oldMarketValid ? current.lowUrl : null,
+    secondLowPriceMinor: oldMarketValid ? current.secondLowPriceMinor : null,
+    secondLowMerchant: oldMarketValid ? current.secondLowMerchant : null,
     updatedAt: new Date().toISOString(),
   };
   await upsertCountryPrice(product.id, withMiStore);
@@ -65,10 +67,13 @@ async function refreshCountry(product: NonNullable<Awaited<ReturnType<typeof get
   const low = offers[0];
   if (!low) { await recordRefresh(product.id, country, source, new Date().toISOString()); throw new Error(`${country}: No eligible new offer is available.`); }
   const refreshedAt = new Date().toISOString();
+  const secondLow = offers.find((offer) => offer.merchant.trim().toLowerCase() !== low.merchant.trim().toLowerCase());
   await upsertCountryPrice(product.id, {
     ...withMiStore, marketProductId: selected.id, marketProductName: selected.name, marketProductUrl: selected.url,
     matchConfidence: selected.confidence, matchStatus: current.matchStatus === 'confirmed' && oldMarketValid ? 'confirmed' : 'auto',
     lowPriceMinor: Math.round(low.price * 100), lowMerchant: low.merchant, lowUrl: low.url, updatedAt: refreshedAt,
+    secondLowPriceMinor: secondLow ? Math.round(secondLow.price * 100) : null,
+    secondLowMerchant: secondLow?.merchant ?? null,
   });
   await recordRefresh(product.id, country, source, refreshedAt);
 }

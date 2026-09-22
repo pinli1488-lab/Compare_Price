@@ -31,6 +31,7 @@ export const productCountryPrices = sqliteTable('product_country_prices', {
   marketProductId: text('market_product_id'), marketProductName: text('market_product_name'), marketProductUrl: text('market_product_url'),
   matchConfidence: integer('match_confidence'), matchStatus: text('match_status').notNull().default('pending'),
   lowPriceMinor: integer('low_price_minor'), lowMerchant: text('low_merchant'), lowUrl: text('low_url'),
+  secondLowPriceMinor: integer('second_low_price_minor'), secondLowMerchant: text('second_low_merchant'),
   expectedPriceMinor: integer('expected_price_minor'), updatedAt: text('updated_at'),
 }, (table) => [
   primaryKey({ columns: [table.productId, table.country] }),

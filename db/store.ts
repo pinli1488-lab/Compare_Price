@@ -8,6 +8,7 @@ export type CountryPriceRecord = {
   marketProductId: string | null; marketProductName: string | null; marketProductUrl: string | null;
   matchConfidence: number | null; matchStatus: MatchStatus;
   lowPriceMinor: number | null; lowMerchant: string | null; lowUrl: string | null;
+  secondLowPriceMinor: number | null; secondLowMerchant: string | null;
   expectedPriceMinor: number | null; updatedAt: string | null; manualRefreshedAt: string | null; autoRefreshedAt: string | null;
 };
 export type ProductVariant = { sku: string; ean: string; title: string; priceMinor: number };
@@ -22,6 +23,14 @@ export function getD1() { if (!env.DB) throw new Error('D1 database is unavailab
 export async function ensureSchema() {
   if (initialized) return;
   const db = getD1();
+  const countryPriceColumns = await db.prepare('PRAGMA table_info(product_country_prices)').all();
+  const existingColumns = new Set(countryPriceColumns.results.map((row) => String(row.name)));
+  if (countryPriceColumns.results.length && !existingColumns.has('second_low_price_minor')) {
+    await db.prepare('ALTER TABLE product_country_prices ADD COLUMN second_low_price_minor INTEGER').run();
+  }
+  if (countryPriceColumns.results.length && !existingColumns.has('second_low_merchant')) {
+    await db.prepare('ALTER TABLE product_country_prices ADD COLUMN second_low_merchant TEXT').run();
+  }
   await db.batch([
     db.prepare(`CREATE TABLE IF NOT EXISTS products (
       id TEXT PRIMARY KEY, sku TEXT NOT NULL DEFAULT '', product_name TEXT NOT NULL, ean TEXT NOT NULL DEFAULT '',
@@ -35,7 +44,9 @@ export async function ensureSchema() {
       mistore_handle TEXT, mistore_name TEXT, mistore_url TEXT, mistore_price_minor INTEGER,
       market_product_id TEXT, market_product_name TEXT, market_product_url TEXT,
       match_confidence INTEGER, match_status TEXT NOT NULL DEFAULT 'pending',
-      low_price_minor INTEGER, low_merchant TEXT, low_url TEXT, expected_price_minor INTEGER, updated_at TEXT,
+      low_price_minor INTEGER, low_merchant TEXT, low_url TEXT,
+      second_low_price_minor INTEGER, second_low_merchant TEXT,
+      expected_price_minor INTEGER, updated_at TEXT,
       PRIMARY KEY (product_id, country)
     )`),
     db.prepare(`CREATE TABLE IF NOT EXISTS product_variants (
@@ -69,6 +80,7 @@ export function emptyCountryPrice(country: CountryCode): CountryPriceRecord {
     mistoreHandle: null, mistoreName: null, mistoreUrl: null, mistorePriceMinor: null,
     marketProductId: null, marketProductName: null, marketProductUrl: null,
     matchConfidence: null, matchStatus: 'pending', lowPriceMinor: null, lowMerchant: null, lowUrl: null,
+    secondLowPriceMinor: null, secondLowMerchant: null,
     expectedPriceMinor: null, updatedAt: null, manualRefreshedAt: null, autoRefreshedAt: null,
   };
 }
@@ -89,6 +101,8 @@ export function mapCountryPrice(row: Record<string, unknown>): CountryPriceRecor
     lowPriceMinor: row.low_price_minor == null ? null : Number(row.low_price_minor),
     lowMerchant: row.low_merchant ? String(row.low_merchant) : null,
     lowUrl: row.low_url ? String(row.low_url) : null,
+    secondLowPriceMinor: row.second_low_price_minor == null ? null : Number(row.second_low_price_minor),
+    secondLowMerchant: row.second_low_merchant ? String(row.second_low_merchant) : null,
     expectedPriceMinor: row.expected_price_minor == null ? null : Number(row.expected_price_minor),
     updatedAt: row.updated_at ? String(row.updated_at) : null,
     manualRefreshedAt: row.manual_at ? String(row.manual_at) : null,
@@ -143,15 +157,17 @@ export async function upsertCountryPrice(productId: string, value: CountryPriceR
   await getD1().prepare(`INSERT INTO product_country_prices (
     product_id,country,currency,mistore_handle,mistore_name,mistore_url,mistore_price_minor,
     market_product_id,market_product_name,market_product_url,match_confidence,match_status,
-    low_price_minor,low_merchant,low_url,expected_price_minor,updated_at
-  ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(product_id,country) DO UPDATE SET
+    low_price_minor,low_merchant,low_url,second_low_price_minor,second_low_merchant,expected_price_minor,updated_at
+  ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(product_id,country) DO UPDATE SET
     currency=excluded.currency,mistore_handle=excluded.mistore_handle,mistore_name=excluded.mistore_name,
     mistore_url=excluded.mistore_url,mistore_price_minor=excluded.mistore_price_minor,
     market_product_id=excluded.market_product_id,market_product_name=excluded.market_product_name,
     market_product_url=excluded.market_product_url,match_confidence=excluded.match_confidence,match_status=excluded.match_status,
     low_price_minor=excluded.low_price_minor,low_merchant=excluded.low_merchant,low_url=excluded.low_url,
+    second_low_price_minor=excluded.second_low_price_minor,second_low_merchant=excluded.second_low_merchant,
     expected_price_minor=excluded.expected_price_minor,updated_at=excluded.updated_at`)
     .bind(productId, value.country, value.currency, value.mistoreHandle, value.mistoreName, value.mistoreUrl, value.mistorePriceMinor,
       value.marketProductId, value.marketProductName, value.marketProductUrl, value.matchConfidence, value.matchStatus,
-      value.lowPriceMinor, value.lowMerchant, value.lowUrl, value.expectedPriceMinor, value.updatedAt).run();
+      value.lowPriceMinor, value.lowMerchant, value.lowUrl, value.secondLowPriceMinor, value.secondLowMerchant,
+      value.expectedPriceMinor, value.updatedAt).run();
 }

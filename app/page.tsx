@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import readXlsxFile from 'read-excel-file';
-import writeXlsxFile from 'write-excel-file';
 
 const COUNTRIES = ['SE', 'DK', 'FI', 'NO'] as const;
 type Country = typeof COUNTRIES[number];
@@ -12,6 +11,7 @@ type Market = {
   currency: string; mistoreHandle: string | null; mistoreName: string | null; mistoreUrl: string | null;
   mistorePriceMinor: number | null; marketProductId: string | null; marketProductName: string | null;
   marketProductUrl: string | null; matchStatus: string; lowPriceMinor: number | null; lowMerchant: string | null;
+  secondLowPriceMinor: number | null; secondLowMerchant: string | null;
   expectedPriceMinor: number | null; updatedAt: string | null; manualRefreshedAt: string | null; autoRefreshedAt: string | null;
 };
 type Product = { id: string; sku: string; productName: string; ean: string; createdAt: string; markets: Record<Country, Market>; variants: Record<Country, Variant[]> };
@@ -126,7 +126,7 @@ export default function Home() {
   const collectionSyncRef = useRef(false);
   const [page, setPage] = useState(1); const [selected, setSelected] = useState<Set<string>>(new Set()); const lastSelectedIndex = useRef<number | null>(null);
   const [refreshing, setRefreshing] = useState(false); const refreshingRef = useRef(false); const [progress, setProgress] = useState({ done: 0, total: 0 });
-  const [notice, setNotice] = useState(''); const [exportOpen, setExportOpen] = useState(false); const [importOpen, setImportOpen] = useState(false);
+  const [notice, setNotice] = useState(''); const [importOpen, setImportOpen] = useState(false);
   const [matchProduct, setMatchProduct] = useState<Product | null>(null); const [matchCountry, setMatchCountry] = useState<Country>('SE');
   const [mistoreQuery, setMistoreQuery] = useState(''); const [marketQuery, setMarketQuery] = useState('');
   const [mistoreCandidates, setMistoreCandidates] = useState<MiStoreCandidate[]>([]); const [marketCandidates, setMarketCandidates] = useState<MarketCandidate[]>([]);
@@ -149,7 +149,7 @@ export default function Home() {
   useEffect(() => { queueMicrotask(() => { void loadProducts().catch((error) => setNotice(String(error))).finally(() => setLoading(false)); }); }, [loadProducts]);
   useEffect(() => { queueMicrotask(() => { void loadCollections().catch((error) => setNotice(String(error))); }); }, [loadCollections]);
   useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(''), 5000); return () => window.clearTimeout(timer); }, [notice]);
-  useEffect(() => { const dismiss = (event: KeyboardEvent) => { if (event.key === 'Escape') { closeImport(); setMatchProduct(null); setExportOpen(false); setCollectionsOpen(false); setActiveVariants(null); } }; document.addEventListener('keydown', dismiss); return () => document.removeEventListener('keydown', dismiss); }, []);
+  useEffect(() => { const dismiss = (event: KeyboardEvent) => { if (event.key === 'Escape') { closeImport(); setMatchProduct(null); setCollectionsOpen(false); setActiveVariants(null); } }; document.addEventListener('keydown', dismiss); return () => document.removeEventListener('keydown', dismiss); }, []);
   useEffect(() => () => { if (variantCloseTimer.current) clearTimeout(variantCloseTimer.current); }, []);
 
   function cancelVariantClose() { if (variantCloseTimer.current) clearTimeout(variantCloseTimer.current); }
@@ -214,8 +214,8 @@ export default function Home() {
           } catch { return 1; }
         }));
         errors += counts.reduce((sum, value) => sum + value, 0); setProgress({ done: index + 1, total: unique.length });
+        await loadProducts();
       }
-      await loadProducts();
       if (!quiet) setNotice(errors ? `Refresh finished. ${errors} country matches need review.` : `Updated ${unique.length} products.`);
     } finally { refreshingRef.current = false; setRefreshing(false); }
   }, [loadProducts]);
@@ -331,7 +331,7 @@ export default function Home() {
           }))));
         priceErrors += results.flat(2).reduce((sum, count) => sum + count, 0);
         progress('pricing', index + 1, ids.length);
-        if (index % 8 === 0 || index + 1 >= ids.length) await loadProducts();
+        await loadProducts();
       }
       progress('complete', ids.length, ids.length);
     } catch (error) { progress('complete', 0, touched.size); setNotice(error instanceof Error ? error.message : 'Collection sync failed'); }
@@ -403,27 +403,39 @@ export default function Home() {
     setSelected(new Set()); await loadProducts();
   }
   const exportGroups = selectedGroups;
-  const exportHeader = ['No.', 'SKU(s)', 'Product', 'EAN(s)', ...COUNTRIES.flatMap((country) => [`${country} MiStore Price`, `${country} Market Lowest`, `${country} Lowest Merchant`, `${country} Expected Price`, `${country} MiStore URL`, `${country} Prisjakt URL`, `${country} Last Manual Refresh`, `${country} Last Auto Refresh`])];
-  const exportRows = exportGroups.map((group) => [numbers.get(group.key) ?? '', group.variants.map((variant) => variant.sku).filter(Boolean).join('; '), group.primary.markets.SE.mistoreName || group.primary.productName, group.variants.map((variant) => variant.ean).filter(Boolean).join('; '), ...COUNTRIES.flatMap((country) => {
-    const market = group.primary.markets[country]; return [priceRange(group, country), market.lowPriceMinor == null ? '' : market.lowPriceMinor / 100,
-      market.lowMerchant ?? '', market.expectedPriceMinor == null ? '' : market.expectedPriceMinor / 100, market.mistoreUrl ?? '', market.marketProductUrl ?? '', market.manualRefreshedAt ?? '', market.autoRefreshedAt ?? ''];
-  })]);
+  const exportHeader = ['No.', 'SKU', 'Product Name', 'EAN',
+    ...COUNTRIES.flatMap((country) => [`${country} MiStore Price`, `${country} Market Lowest`, `${country} Market Second Lowest`, `${country} Expected Price`, `${country} Cost Price`]),
+    ...COUNTRIES.flatMap((country) => [`${country} Lowest Merchant`, `${country} Second Lowest Merchant`, `${country} MiStore URL`, `${country} Prisjakt URL`, `${country} Last Manual Refresh`, `${country} Last Auto Refresh`])];
+  const exportRows = exportGroups.flatMap((group) => {
+    const variants = group.variants.length ? group.variants : [{ sku: group.primary.sku, ean: group.primary.ean, title: '', priceMinor: group.primary.markets.SE.mistorePriceMinor ?? 0 }];
+    return variants.map((variant, variantIndex) => {
+      const baseName = group.primary.markets.SE.mistoreName || group.primary.productName;
+      const productName = variant.title && !/^default title$/i.test(variant.title.trim()) ? `${baseName} - ${variant.title}` : baseName;
+      const prices = COUNTRIES.flatMap((country) => {
+        const market = group.primary.markets[country];
+        const countryVariant = group.members.flatMap((member) => member.variants[country] ?? [])
+          .find((item) => (variant.sku && item.sku === variant.sku) || (variant.ean && item.ean === variant.ean));
+        const mistorePrice = countryVariant?.priceMinor ?? market.mistorePriceMinor;
+        return [mistorePrice == null ? '' : mistorePrice / 100, market.lowPriceMinor == null ? '' : market.lowPriceMinor / 100,
+          market.secondLowPriceMinor == null ? '' : market.secondLowPriceMinor / 100,
+          market.expectedPriceMinor == null ? '' : market.expectedPriceMinor / 100, ''];
+      });
+      const sources = COUNTRIES.flatMap((country) => {
+        const market = group.primary.markets[country];
+        return [market.lowMerchant ?? '', market.secondLowMerchant ?? '', market.mistoreUrl ?? '', market.marketProductUrl ?? '', market.manualRefreshedAt ?? '', market.autoRefreshedAt ?? ''];
+      });
+      return [`${numbers.get(group.key) ?? ''}${variants.length > 1 ? `.${variantIndex + 1}` : ''}`, variant.sku, productName, variant.ean, ...prices, ...sources];
+    });
+  });
   function exportCsv() {
     if (!exportGroups.length) return; const csv = [exportHeader, ...exportRows].map((row) => row.map(escapeCsv).join(',')).join('\r\n');
     const url = URL.createObjectURL(new Blob(['\ufeff', csv], { type: 'text/csv;charset=utf-8' }));
-    const anchor = document.createElement('a'); anchor.href = url; anchor.download = `PriceDesk_${new Date().toISOString().slice(0, 10)}.csv`; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000); setExportOpen(false);
-  }
-  async function exportExcel() {
-    if (!exportGroups.length) return;
-    const rows = [exportHeader, ...exportRows].map((row, index) => row.map((value) => ({ value, type: typeof value === 'number' ? Number : String, fontWeight: index === 0 ? 'bold' as const : undefined, backgroundColor: index === 0 ? '#202020' : undefined, color: index === 0 ? '#ffffff' : '#171717' })));
-    try { await writeXlsxFile(rows, { fileName: `PriceDesk_${new Date().toISOString().slice(0, 10)}.xlsx`, stickyRowsCount: 1 }); setExportOpen(false); }
-    catch (error) { setNotice(error instanceof Error ? error.message : 'Excel export failed'); }
+    const anchor = document.createElement('a'); anchor.href = url; anchor.download = `PriceDesk_${new Date().toISOString().slice(0, 10)}.csv`; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   return <main className="app-shell">
     <header className="topbar"><div className="brand"><span className="brand-mark">P</span><strong>PriceDesk</strong></div><div className="topbar-actions">
       <button className="button" onClick={() => setCollectionsOpen(true)}>Collections</button>
-      <div className="dropdown-wrap"><button className="button" onClick={() => setExportOpen(!exportOpen)} disabled={!selectedGroups.length}>Export selected ({selectedGroups.length})</button>
-        {exportOpen && <div className="dropdown"><button onClick={exportExcel}>Excel (.xlsx)</button><button onClick={exportCsv}>CSV (.csv)</button></div>}</div>
+      <button className="button" onClick={exportCsv} disabled={!selectedGroups.length}>Export CSV ({selectedGroups.length})</button>
       <button className="button primary" onClick={() => setImportOpen(true)}>Import products</button>
     </div></header>
     <section className="toolbar">
@@ -432,15 +444,16 @@ export default function Home() {
       <select aria-label="Country filter" value={filterCountry} onChange={(event) => { setFilterCountry(event.target.value as Country | 'ALL'); setPage(1); }}><option value="ALL">All countries</option>{COUNTRIES.map((country) => <option key={country}>{country}</option>)}</select>
       <select aria-label="Collection filter" value={collectionFilter} onChange={(event) => { setCollectionFilter(event.target.value); setPage(1); }}><option value="ALL">All collections</option>{collections.map((collection) => <option key={collection.handle} value={collection.handle}>{collection.title}</option>)}</select>
       <button className="button" disabled={refreshing || !selected.size} onClick={() => void refreshIds([...selected])}>{refreshing ? `Refreshing ${progress.done}/${progress.total}` : `Refresh selected (${selectedGroups.length})`}</button>
+      {selected.size > 0 && <button className="button" onClick={() => { setSelected(new Set()); lastSelectedIndex.current = null; }}>Clear selection</button>}
       {selected.size > 0 && <button className="delete-button" onClick={deleteSelected}>Delete selected</button>}
       <div className="toolbar-meta"><span>Manual (Stockholm): {dateLabel(lastManual)}</span><span>Automatic (Stockholm): {dateLabel(lastAuto)}</span></div>
       <div className="pager"><span>{filtered.length ? `${(safePage - 1) * 50 + 1}–${Math.min(safePage * 50, filtered.length)}` : '0'} / {filtered.length}</span><button disabled={safePage <= 1} onClick={() => setPage(safePage - 1)} aria-label="Previous page">‹</button><span>{safePage} / {pageCount}</span><button disabled={safePage >= pageCount} onClick={() => setPage(safePage + 1)} aria-label="Next page">›</button></div>
     </section>
-    <section className="grid-wrap" onScrollCapture={() => setActiveVariants(null)}><table className="price-grid"><colgroup><col style={{ width: 36 }}/><col style={{ width: 235 }}/>{COUNTRIES.flatMap((country) => [<col key={`${country}-own`} style={{ width: 145 }}/>, <col key={`${country}-market`} style={{ width: 145 }}/>, <col key={`${country}-expected`} style={{ width: 145 }}/>])}<col style={{ width: 126 }}/></colgroup><thead><tr>
+    <section className="grid-wrap" onScrollCapture={() => setActiveVariants(null)}><table className="price-grid"><colgroup><col style={{ width: 36 }}/><col style={{ width: 235 }}/>{COUNTRIES.flatMap((country) => [<col key={`${country}-own`} style={{ width: 145 }}/>, <col key={`${country}-market`} style={{ width: 145 }}/>, <col key={`${country}-second`} style={{ width: 145 }}/>, <col key={`${country}-expected`} style={{ width: 145 }}/>, <col key={`${country}-cost`} style={{ width: 145 }}/>])}<col style={{ width: 126 }}/></colgroup><thead><tr>
       <th rowSpan={2} className="check"><input aria-label="Select current page" type="checkbox" checked={allPageSelected} onChange={togglePage}/></th><th rowSpan={2} className="product-head">No. / SKU / Product</th>
-      {COUNTRIES.map((country) => <th key={country} colSpan={3} className="country-head">{country} <small>({currency[country]})</small></th>)}<th rowSpan={2} className="action-head">Actions</th>
-    </tr><tr>{COUNTRIES.flatMap((country) => [<th key={`${country}-own`}>MiStore Price</th>, <th key={`${country}-market`}>Lowest Price<br/>in Market</th>, <th key={`${country}-expected`}>Expected Price</th>])}</tr></thead><tbody>
-      {loading ? <tr><td colSpan={15} className="state-row">Loading products…</td></tr> : !pageRows.length ? <tr><td colSpan={15} className="state-row">No products match this filter.</td></tr> : pageRows.map((group) => {
+      {COUNTRIES.map((country) => <th key={country} colSpan={5} className="country-head">{country} <small>({currency[country]})</small></th>)}<th rowSpan={2} className="action-head">Actions</th>
+    </tr><tr>{COUNTRIES.flatMap((country) => [<th key={`${country}-own`}>MiStore Price</th>, <th key={`${country}-market`}>Lowest Price<br/>in Market</th>, <th key={`${country}-second`}>Second Lowest<br/>Price</th>, <th key={`${country}-expected`}>Expected Price</th>, <th key={`${country}-cost`}>Cost Price</th>])}</tr></thead><tbody>
+      {loading ? <tr><td colSpan={23} className="state-row">Loading products…</td></tr> : !pageRows.length ? <tr><td colSpan={23} className="state-row">No products match this filter.</td></tr> : pageRows.map((group) => {
         const product = group.primary; const groupIndex = filtered.findIndex((item) => item.key === group.key); const checked = group.members.every((member) => selected.has(member.id));
         return <tr key={group.key}><td className="check"><input type="checkbox" checked={checked} readOnly onClick={(event) => toggleGroup(group, groupIndex, event.shiftKey)} aria-label={`Select product ${numbers.get(group.key)}`}/></td>
           <td className="product-cell"><strong><span className="row-number">{numbers.get(group.key)}.</span> {product.sku || group.variants[0]?.sku || '—'}</strong><span title={product.markets.SE.mistoreName || product.productName}>{product.markets.SE.mistoreName || product.productName}</span>
@@ -456,7 +469,11 @@ export default function Home() {
               <td key={`${country}-market`} className="price-cell" title={tooltip}>{market.lowPriceMinor != null && market.marketProductUrl
                 ? <a className="price-link" href={market.marketProductUrl} target="_blank" rel="noreferrer">{money(market.lowPriceMinor, country)}</a>
                 : <span className="price-link">—</span>}<small className="merchant" title={market.lowMerchant ?? ''}>{market.lowMerchant || 'Not matched'}</small></td>,
-              <td key={`${country}-expected`} className="price-cell expected-cell"><input aria-label={`${country} Expected Price for product ${numbers.get(group.key)}`} value={key in expectedDraft ? expectedDraft[key] : market.expectedPriceMinor == null ? '' : String(market.expectedPriceMinor / 100)} onChange={(event) => setExpectedDraft((draft) => ({ ...draft, [key]: event.target.value }))} onBlur={() => void saveExpected(product, country)} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }} placeholder="—"/><small className={expectedDiff ? expectedDiff.percentage > 0 ? 'bad' : 'good' : 'neutral'}>{expectedDiff?.label ?? '—'}</small></td>];
+              <td key={`${country}-second`} className="price-cell" title={tooltip}>{market.secondLowPriceMinor != null && market.marketProductUrl
+                ? <a className="price-link" href={market.marketProductUrl} target="_blank" rel="noreferrer">{money(market.secondLowPriceMinor, country)}</a>
+                : <span className="price-link">—</span>}<small className="merchant" title={market.secondLowMerchant ?? ''}>{market.secondLowMerchant || 'Not available'}</small></td>,
+              <td key={`${country}-expected`} className="price-cell expected-cell"><input aria-label={`${country} Expected Price for product ${numbers.get(group.key)}`} value={key in expectedDraft ? expectedDraft[key] : market.expectedPriceMinor == null ? '' : String(market.expectedPriceMinor / 100)} onChange={(event) => setExpectedDraft((draft) => ({ ...draft, [key]: event.target.value }))} onBlur={() => void saveExpected(product, country)} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }} placeholder="—"/><small className={expectedDiff ? expectedDiff.percentage > 0 ? 'bad' : 'good' : 'neutral'}>{expectedDiff?.label ?? '—'}</small></td>,
+              <td key={`${country}-cost`} className="price-cell"><span className="price-link">—</span><small className="neutral">—</small></td>];
           })}<td className="action-cell"><button className="match-button" onClick={() => openMatch(product)}>Match / Edit</button></td>
         </tr>;
       })}

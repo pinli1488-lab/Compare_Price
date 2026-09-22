@@ -32,11 +32,14 @@ export async function POST(request: Request) {
   const offers = await fetchOffers(productId, body.country);
   const low = offers[0];
   if (!low) return Response.json({ error: 'No eligible new offers found' }, { status: 422 });
+  const secondLow = offers.find((offer) => offer.merchant.trim().toLowerCase() !== low.merchant.trim().toLowerCase());
   await upsertCountryPrice(body.id, {
     ...current, currency: COUNTRIES[body.country].currency, marketProductId: productId,
     marketProductName: body.productName || current.mistoreName || product.productName, marketProductUrl: `${COUNTRIES[body.country].marketOrigin}/produkt.php?p=${productId}`,
     matchConfidence: body.confidence ?? 100, matchStatus: 'confirmed', lowPriceMinor: Math.round(low.price * 100),
     lowMerchant: low.merchant, lowUrl: low.url, updatedAt: new Date().toISOString(),
+    secondLowPriceMinor: secondLow ? Math.round(secondLow.price * 100) : null,
+    secondLowMerchant: secondLow?.merchant ?? null,
   });
   return Response.json({ matched: true });
 }
@@ -49,8 +52,8 @@ export async function DELETE(request: Request) {
   if (!raw) return Response.json({ removed: true });
   const current = mapCountryPrice(raw as Record<string, unknown>);
   if (body.source === 'mistore') {
-    await upsertCountryPrice(body.id, { ...current, mistoreHandle: null, mistoreName: null, mistoreUrl: null, mistorePriceMinor: null, lowPriceMinor: null, lowMerchant: null, lowUrl: null, matchStatus: 'pending' });
+    await upsertCountryPrice(body.id, { ...current, mistoreHandle: null, mistoreName: null, mistoreUrl: null, mistorePriceMinor: null, lowPriceMinor: null, lowMerchant: null, lowUrl: null, secondLowPriceMinor: null, secondLowMerchant: null, matchStatus: 'pending' });
     await getD1().prepare('DELETE FROM product_variants WHERE product_id=? AND country=?').bind(body.id, body.country).run();
-  } else await upsertCountryPrice(body.id, { ...current, marketProductId: null, marketProductName: null, marketProductUrl: null, matchConfidence: null, matchStatus: 'pending', lowPriceMinor: null, lowMerchant: null, lowUrl: null });
+  } else await upsertCountryPrice(body.id, { ...current, marketProductId: null, marketProductName: null, marketProductUrl: null, matchConfidence: null, matchStatus: 'pending', lowPriceMinor: null, lowMerchant: null, lowUrl: null, secondLowPriceMinor: null, secondLowMerchant: null });
   return Response.json({ removed: true });
 }
