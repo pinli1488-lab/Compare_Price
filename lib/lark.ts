@@ -101,10 +101,22 @@ export async function writeExpectedPrices(country: CountryCode, expectedPriceMin
 
 export function larkNumber(value: unknown) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
+  // Lookup and rollup fields are returned by Lark as arrays, even when the
+  // formula resolves to one numeric value. Only accept a single unique number
+  // so an accidental multi-match never becomes an arbitrary product cost.
+  if (Array.isArray(value)) {
+    const numbers = value.map(larkNumber).filter((item): item is number => item != null);
+    const unique = [...new Set(numbers)];
+    return unique.length === 1 ? unique[0] : null;
+  }
   if (typeof value === 'string') {
     const normalized = value.trim().replace(/\s/g, '').replace(',', '.');
     const parsed = Number(normalized);
     return Number.isFinite(parsed) ? parsed : null;
+  }
+  if (typeof value === 'object' && value) {
+    if ('value' in value) return larkNumber((value as { value: unknown }).value);
+    if ('text' in value) return larkNumber((value as { text: unknown }).text);
   }
   return null;
 }
