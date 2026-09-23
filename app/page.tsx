@@ -32,7 +32,7 @@ type Matrix = Array<Array<string | number | boolean | Date | null>>;
 type ApiPayload = { error?: string; products?: Product[]; mistoreCandidates?: MiStoreCandidate[]; marketCandidates?: MarketCandidate[];
   errors?: Array<{ message: string }>; imported?: number; updated?: number; ids?: string[]; touchedIds?: string[]; collections?: Collection[]; collection?: Collection;
   processed?: number; failedHandles?: string[]; lark?: LarkStatus; synced?: number; duplicateRows?: number;
-  larkWriteback?: string; writebackErrors?: string[] };
+  larkWriteback?: string; larkWritebackCount?: number; writebackErrors?: string[] };
 type LarkStatus = { configured: boolean; lastSyncedAt: string | null; lastError: string | null };
 const currency: Record<Country, string> = { SE: 'SEK', DK: 'DKK', FI: 'EUR', NO: 'NOK' };
 const locale: Record<Country, string> = { SE: 'sv-SE', DK: 'da-DK', FI: 'fi-FI', NO: 'nb-NO' };
@@ -132,9 +132,9 @@ function groupProfitRange(group: Group, country: Country, expectedPriceMinor: nu
   const margin = Math.round(lowMargin) === Math.round(highMargin) ? `${Math.round(lowMargin)}%` : `${Math.round(lowMargin)}% – ${Math.round(highMargin)}%`;
   return `${amount} · ${margin}`;
 }
-function dateLabel(value: string | null) {
+function dateLabel(value: string | null, timeZone = 'Europe/Stockholm') {
   if (!value) return 'Never';
-  return new Intl.DateTimeFormat('en-GB', { dateStyle: 'short', timeStyle: 'short', timeZone: 'Europe/Stockholm' }).format(new Date(value));
+  return new Intl.DateTimeFormat('en-GB', { dateStyle: 'short', timeStyle: 'short', timeZone }).format(new Date(value));
 }
 function escapeCsv(value: unknown) {
   const string = String(value ?? '');
@@ -250,6 +250,10 @@ export default function Home() {
     const unique = [...new Set(ids)]; if (!unique.length || refreshingRef.current) return;
     refreshingRef.current = true; setRefreshing(true); setProgress({ done: 0, total: unique.length }); let errors = 0;
     try {
+      try {
+        const larkResponse = await fetch('/api/lark/sync', { method: 'POST' });
+        if (larkResponse.ok) await loadProducts();
+      } catch { /* Price refresh can continue when the cost source is temporarily unavailable. */ }
       for (const [index, id] of unique.entries()) {
         const counts = await Promise.all(countries.map(async (country) => {
           try {
@@ -269,7 +273,7 @@ export default function Home() {
     const input = expectedDraft[key]; const parsed = parsePrice(input);
     if (input.trim() && (!Number.isFinite(parsed) || parsed < 0)) return setNotice('Enter a valid expected price.');
     const expectedPriceMinor = input.trim() ? Math.round(parsed * 100) : null;
-    const skus = [...new Set([product.sku, ...group.variants.map((variant) => variant.sku)].filter(Boolean))];
+    const skus = product.sku ? [product.sku] : [];
     const response = await fetch('/api/products', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: product.id, country, expectedPriceMinor, skus }) });
     const data = await response.json() as ApiPayload;
     if (!response.ok) return setNotice(data.error || 'Could not save expected price.');
@@ -277,7 +281,7 @@ export default function Home() {
       ? { ...item, markets: { ...item.markets, [country]: { ...item.markets[country], expectedPriceMinor } } }
       : item));
     setExpectedDraft((draft) => { if (draft[key] !== input) return draft; const next = { ...draft }; delete next[key]; return next; });
-    if (data.larkWriteback === 'saved') setNotice(`Expected price saved to Lark for ${skus.length} SKU${skus.length === 1 ? '' : 's'}.`);
+    if (data.larkWriteback === 'saved') setNotice(`Expected price saved to Lark for SKU ${product.sku}.`);
     else if (data.larkWriteback === 'partial') setNotice('Saved locally, but some Lark rows could not be updated.');
     else if (data.larkWriteback === 'no_matching_sku') setNotice('Saved locally. No matching SKU row was found in Lark.');
     else setNotice('Saved locally. Connect Lark to enable writeback.');
@@ -509,7 +513,7 @@ export default function Home() {
       <button className="button" disabled={refreshing || !selected.size} onClick={() => void refreshIds([...selected])}>{refreshing ? `Refreshing ${progress.done}/${progress.total}` : `Refresh selected (${selectedGroups.length})`}</button>
       {selected.size > 0 && <button className="button" onClick={() => { setSelected(new Set()); lastSelectedIndex.current = null; }}>Clear selection</button>}
       {selected.size > 0 && <button className="delete-button" onClick={deleteSelected}>Delete selected</button>}
-      <div className="toolbar-meta"><span>Lark: {lark.configured ? dateLabel(lark.lastSyncedAt) : 'Not connected'}</span><span>Manual (Stockholm): {dateLabel(lastManual)}</span><span>Automatic (Stockholm): {dateLabel(lastAuto)}</span></div>
+      <div className="toolbar-meta"><span>Lark: {lark.configured ? dateLabel(lark.lastSyncedAt) : 'Not connected'}</span><span>Manual (Stockholm): {dateLabel(lastManual)}</span><span>Automatic (Beijing): {dateLabel(lastAuto, 'Asia/Shanghai')}</span></div>
       <div className="pager"><span>{filtered.length ? `${(safePage - 1) * 50 + 1}–${Math.min(safePage * 50, filtered.length)}` : '0'} / {filtered.length}</span><button disabled={safePage <= 1} onClick={() => setPage(safePage - 1)} aria-label="Previous page">‹</button><span>{safePage} / {pageCount}</span><button disabled={safePage >= pageCount} onClick={() => setPage(safePage + 1)} aria-label="Next page">›</button></div>
     </section>
     <section className="grid-wrap" onScrollCapture={() => setActiveVariants(null)}><table className="price-grid"><colgroup><col style={{ width: 36 }}/><col style={{ width: 235 }}/>{COUNTRIES.flatMap((country) => [<col key={`${country}-own`} style={{ width: 145 }}/>, <col key={`${country}-market`} style={{ width: 145 }}/>, <col key={`${country}-second`} style={{ width: 145 }}/>, <col key={`${country}-expected`} style={{ width: 145 }}/>, <col key={`${country}-cost`} style={{ width: 145 }}/>])}<col style={{ width: 126 }}/></colgroup><thead><tr>
@@ -528,7 +532,7 @@ export default function Home() {
             const expectedPriceMinor = key in expectedDraft ? draftPrice != null && Number.isFinite(draftPrice) && draftPrice >= 0 ? Math.round(draftPrice * 100) : null : market.expectedPriceMinor;
             const expectedDiff = difference(expectedPriceMinor, market.lowPriceMinor);
             const profit = groupProfitRange(group, country, expectedPriceMinor); const cost = groupCostRange(group, country);
-            const tooltip = `Manual: ${dateLabel(market.manualRefreshedAt)} | Automatic: ${dateLabel(market.autoRefreshedAt)}`;
+            const tooltip = `Manual (Stockholm): ${dateLabel(market.manualRefreshedAt)} | Automatic (Beijing): ${dateLabel(market.autoRefreshedAt, 'Asia/Shanghai')}`;
             return [<td key={`${country}-own`} className="price-cell" title={tooltip}><a className="price-link" href={market.mistoreUrl || undefined} target="_blank" rel="noreferrer" title={priceRange(group, country)}>{priceRange(group, country)}</a><small className={ownDiff ? ownDiff.percentage > 0 ? 'bad' : 'good' : 'neutral'}>{ownDiff?.label ?? '—'}</small></td>,
               <td key={`${country}-market`} className="price-cell" title={tooltip}>{market.lowPriceMinor != null && market.marketProductUrl
                 ? <a className="price-link" href={market.marketProductUrl} target="_blank" rel="noreferrer">{money(market.lowPriceMinor, country)}</a>

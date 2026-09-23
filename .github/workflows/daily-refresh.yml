@@ -4,19 +4,43 @@ on:
   schedule:
     # GitHub Actions cron uses UTC. 00:00 UTC is 08:00 in Beijing (UTC+8).
     - cron: '0 0 * * *'
+    # A delayed fallback covers an occasionally dropped GitHub scheduled run.
+    # The script exits without refreshing when the 08:00 run already updated today.
+    - cron: '30 0 * * *'
   workflow_dispatch:
+
+concurrency:
+  group: pricedesk-daily-refresh
+  cancel-in-progress: false
 
 jobs:
   refresh:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Refresh every saved product
         env:
           PRICE_DESK_URL: ${{ vars.PRICE_DESK_URL }}
+          RUN_SCHEDULE: ${{ github.event.schedule }}
         run: |
           node <<'NODE'
           const base = process.env.PRICE_DESK_URL?.replace(/\/$/, '');
           if (!base) throw new Error('Set the PRICE_DESK_URL repository variable first.');
+          const initial = await fetch(`${base}/api/products`);
+          if (!initial.ok) throw new Error(`Product list failed: ${initial.status}`);
+          const initialPayload = await initial.json();
+          if (process.env.RUN_SCHEDULE === '30 0 * * *') {
+            const beijingDay = (value) => new Intl.DateTimeFormat('en-CA', {
+              timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+            }).format(new Date(value));
+            const today = beijingDay(Date.now());
+            const alreadyUpdated = (initialPayload.products ?? []).some((product) =>
+              Object.values(product.markets ?? {}).some((market) => market.autoRefreshedAt && beijingDay(market.autoRefreshedAt) === today));
+            if (alreadyUpdated) {
+              console.log(`The Beijing 08:00 refresh already ran for ${today}; fallback skipped.`);
+              process.exit(0);
+            }
+          }
           const lark = await fetch(`${base}/api/lark/sync`, { method: 'POST' });
           if (!lark.ok) console.warn(`Lark cost sync skipped: ${lark.status} ${await lark.text()}`);
           const selected = await fetch(`${base}/api/collections`);

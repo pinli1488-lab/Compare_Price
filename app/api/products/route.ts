@@ -63,6 +63,7 @@ export async function PATCH(request: Request) {
   if (value != null && (!Number.isFinite(value) || value < 0)) return Response.json({ error: 'Invalid expected price' }, { status: 400 });
   let larkWriteback: 'saved' | 'not_connected' | 'no_matching_sku' | 'partial' = 'not_connected';
   let writebackErrors: string[] = [];
+  let larkWritebackCount = 0;
   if (isLarkConfigured()) {
     const normalized = [...new Set((body.skus ?? []).map((sku) => sku.trim().toLowerCase()).filter(Boolean))];
     if (normalized.length) {
@@ -70,6 +71,7 @@ export async function PATCH(request: Request) {
       const records = await getD1().prepare(`SELECT record_id FROM lark_product_costs WHERE sku_normalized IN (${placeholders})`).bind(...normalized).all();
       if (records.results.length) {
         const results = await writeExpectedPrices(body.country, value, records.results.map((row) => String(row.record_id)));
+        larkWritebackCount = results.filter((result) => result.ok).length;
         writebackErrors = results.filter((result) => !result.ok).map((result) => result.error ?? result.recordId);
         larkWriteback = writebackErrors.length ? 'partial' : 'saved';
       } else larkWriteback = 'no_matching_sku';
@@ -78,7 +80,7 @@ export async function PATCH(request: Request) {
   await getD1().prepare(`INSERT INTO product_country_prices (product_id,country,currency,expected_price_minor)
     VALUES (?,?,?,?) ON CONFLICT(product_id,country) DO UPDATE SET expected_price_minor=excluded.expected_price_minor`)
     .bind(body.id, body.country, body.country === 'FI' ? 'EUR' : body.country === 'DK' ? 'DKK' : body.country === 'NO' ? 'NOK' : 'SEK', value).run();
-  return Response.json({ saved: true, larkWriteback, writebackErrors });
+  return Response.json({ saved: true, larkWriteback, larkWritebackCount, writebackErrors });
 }
 
 export async function DELETE(request: Request) {
