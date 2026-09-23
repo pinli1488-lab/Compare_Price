@@ -108,9 +108,9 @@ function convertedCost(costSekMinor: number, country: Country) { return Math.rou
 function expectedProfit(record: LarkCost, country: Country, expectedPriceMinor: number | null) {
   if (record.status !== 'ok' || record.costSekMinor == null || expectedPriceMinor == null || expectedPriceMinor <= 0) return null;
   const logistics = country === 'SE' ? record.seLogisticsSekMinor : country === 'DK' ? record.dkLogisticsSekMinor : country === 'FI' ? record.fiLogisticsSekMinor : record.noLogisticsSekMinor;
-  if ([record.warehouseSekMinor, logistics, record.fixedFeeSekMinor, record.rabattSekMinor].some((value) => value == null)) return null;
+  if ([record.warehouseSekMinor, logistics, record.fixedFeeSekMinor].some((value) => value == null)) return null;
   const grossSek = expectedPriceMinor * larkRate[country];
-  let profit = grossSek / vatRate[country] - record.costSekMinor - record.warehouseSekMinor! - logistics! - record.fixedFeeSekMinor! + record.rabattSekMinor! - grossSek * 0.03;
+  let profit = grossSek / vatRate[country] - record.costSekMinor - record.warehouseSekMinor! - logistics! - record.fixedFeeSekMinor! + (record.rabattSekMinor ?? 0) - grossSek * 0.03;
   if (country === 'SE') profit -= (record.chemicalTaxSeSekMinor ?? 0) + (record.copySweSekMinor ?? 0);
   if (country === 'DK') profit -= record.copyDkSekMinor ?? 0;
   return { profitMinor: country === 'DK' || country === 'FI' ? Math.round(profit / 100) * 100 : Math.round(profit / 10) * 10, margin: profit / grossSek * 100 };
