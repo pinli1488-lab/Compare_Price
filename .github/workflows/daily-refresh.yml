@@ -4,9 +4,11 @@ on:
   schedule:
     # GitHub Actions cron uses UTC. 00:00 UTC is 08:00 in Beijing (UTC+8).
     - cron: '0 0 * * *'
-    # A delayed fallback covers an occasionally dropped GitHub scheduled run.
-    # The script exits without refreshing when the 08:00 run already updated today.
-    - cron: '30 0 * * *'
+    # GitHub may delay or drop scheduled events at the top of the hour.
+    # These offset retries run only if today's four-country refresh is incomplete.
+    - cron: '7 0 * * *'
+    - cron: '27 0 * * *'
+    - cron: '47 0 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -26,16 +28,21 @@ jobs:
           node <<'NODE'
           const base = process.env.PRICE_DESK_URL?.replace(/\/$/, '');
           if (!base) throw new Error('Set the PRICE_DESK_URL repository variable first.');
+          const beijingDay = (value) => new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+          }).format(new Date(value));
+          const today = beijingDay(Date.now());
+          const countries = ['SE', 'DK', 'FI', 'NO'];
+          const needsRefresh = (product) => countries.some((country) => {
+            const refreshedAt = product.markets?.[country]?.autoRefreshedAt;
+            return !refreshedAt || beijingDay(refreshedAt) !== today;
+          });
           const initial = await fetch(`${base}/api/products`);
           if (!initial.ok) throw new Error(`Product list failed: ${initial.status}`);
           const initialPayload = await initial.json();
-          if (process.env.RUN_SCHEDULE === '30 0 * * *') {
-            const beijingDay = (value) => new Intl.DateTimeFormat('en-CA', {
-              timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
-            }).format(new Date(value));
-            const today = beijingDay(Date.now());
-            const alreadyUpdated = (initialPayload.products ?? []).some((product) =>
-              Object.values(product.markets ?? {}).some((market) => market.autoRefreshedAt && beijingDay(market.autoRefreshedAt) === today));
+          if (process.env.RUN_SCHEDULE) {
+            const alreadyUpdated = (initialPayload.products ?? []).length > 0 &&
+              initialPayload.products.every((product) => !needsRefresh(product));
             if (alreadyUpdated) {
               console.log(`The Beijing 08:00 refresh already ran for ${today}; fallback skipped.`);
               process.exit(0);
@@ -65,8 +72,8 @@ jobs:
           const response = await fetch(`${base}/api/products`);
           if (!response.ok) throw new Error(`Product list failed: ${response.status}`);
           const { products = [] } = await response.json();
-          const countries = ['SE', 'DK', 'FI', 'NO'];
-          for (const [index, product] of products.entries()) {
+          const pending = process.env.RUN_SCHEDULE ? products.filter(needsRefresh) : products;
+          for (const [index, product] of pending.entries()) {
             const results = await Promise.all(countries.map((country) => fetch(`${base}/api/refresh`, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
@@ -77,5 +84,5 @@ jobs:
               if (!refresh.ok || payload.errors?.length) console.error(`Product ${index + 1} ${countries[countryIndex]} failed: ${JSON.stringify(payload.errors ?? refresh.status)}`);
             }
           }
-          console.log(`Processed ${products.length} products.`);
+          console.log(`Processed ${pending.length} of ${products.length} products.`);
           NODE
