@@ -99,7 +99,7 @@ export async function writeExpectedPrices(country: CountryCode, expectedPriceMin
   return results;
 }
 
-export function larkNumber(value: unknown) {
+export function larkNumber(value: unknown): number | null {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   // Lookup and rollup fields are returned by Lark as arrays, even when the
   // formula resolves to one numeric value. Only accept a single unique number
