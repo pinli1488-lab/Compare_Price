@@ -191,6 +191,14 @@ export default function Home() {
     if (!response.ok) throw new Error(data.error || 'Could not load collections'); setCollections(data.collections ?? []);
   }, []);
   useEffect(() => { queueMicrotask(() => { void loadProducts().catch((error) => setNotice(String(error))).finally(() => setLoading(false)); }); }, [loadProducts]);
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void loadProducts().catch(() => {});
+    }, 60_000);
+    const onVisible = () => { if (document.visibilityState === 'visible') void loadProducts().catch(() => {}); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => { window.clearInterval(timer); document.removeEventListener('visibilitychange', onVisible); };
+  }, [loadProducts]);
   useEffect(() => { queueMicrotask(() => { void loadCollections().catch((error) => setNotice(String(error))); }); }, [loadCollections]);
   useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(''), 5000); return () => window.clearTimeout(timer); }, [notice]);
   useEffect(() => { const dismiss = (event: KeyboardEvent) => { if (event.key === 'Escape') { closeImport(); setMatchProduct(null); setCollectionsOpen(false); setActiveVariants(null); } }; document.addEventListener('keydown', dismiss); return () => document.removeEventListener('keydown', dismiss); }, []);
@@ -518,7 +526,7 @@ export default function Home() {
       <button className="button" disabled={refreshing || !selected.size} onClick={() => void refreshIds([...selected])}>{refreshing ? `Refreshing ${progress.done}/${progress.total}` : `Refresh selected (${selectedGroups.length})`}</button>
       {selected.size > 0 && <button className="button" onClick={() => { setSelected(new Set()); lastSelectedIndex.current = null; }}>Clear selection</button>}
       {selected.size > 0 && <button className="delete-button" onClick={deleteSelected}>Delete selected</button>}
-      <div className="toolbar-meta"><span>Lark: {lark.configured ? dateLabel(lark.lastSyncedAt) : 'Not connected'}</span><span>Manual (Stockholm): {dateLabel(lastManual)}</span><span>Automatic (Beijing): {dateLabel(lastAuto, 'Asia/Shanghai')} · {autoCompletedToday}/{products.length} products today</span></div>
+      <div className="toolbar-meta"><span>Lark: {lark.configured ? dateLabel(lark.lastSyncedAt) : 'Not connected'}</span><span>Manual (Stockholm): {dateLabel(lastManual)}</span><span>Automatic (Beijing): {dateLabel(lastAuto, 'Asia/Shanghai')} · {autoCompletedToday}/{products.length} checked today</span></div>
       <div className="pager"><span>{filtered.length ? `${(safePage - 1) * 50 + 1}–${Math.min(safePage * 50, filtered.length)}` : '0'} / {filtered.length}</span><button disabled={safePage <= 1} onClick={() => setPage(safePage - 1)} aria-label="Previous page">‹</button><span>{safePage} / {pageCount}</span><button disabled={safePage >= pageCount} onClick={() => setPage(safePage + 1)} aria-label="Next page">›</button></div>
     </section>
     <section className="grid-wrap" onScrollCapture={() => setActiveVariants(null)}><table className="price-grid"><colgroup><col style={{ width: 36 }}/><col style={{ width: 235 }}/>{COUNTRIES.flatMap((country) => [<col key={`${country}-own`} style={{ width: 145 }}/>, <col key={`${country}-market`} style={{ width: 145 }}/>, <col key={`${country}-second`} style={{ width: 145 }}/>, <col key={`${country}-expected`} style={{ width: 145 }}/>, <col key={`${country}-cost`} style={{ width: 145 }}/>])}<col style={{ width: 126 }}/></colgroup><thead><tr>
