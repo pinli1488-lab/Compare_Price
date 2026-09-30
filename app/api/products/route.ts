@@ -6,16 +6,19 @@ export const runtime = 'edge';
 
 export async function GET() {
   await ensureSchema();
-  const [products, prices, variants, costs, larkStatus] = await Promise.all([
+  const [products, prices, variants, costs, larkStatus, publishLogs] = await Promise.all([
     getD1().prepare('SELECT id,sku,product_name,ean,created_at FROM products ORDER BY created_at ASC, rowid ASC').all(),
     getD1().prepare(`SELECT p.*, l.manual_at, l.auto_at FROM product_country_prices p
       LEFT JOIN price_refresh_log l ON l.product_id=p.product_id AND l.country=p.country`).all(),
     getD1().prepare('SELECT * FROM product_variants').all(),
     getD1().prepare('SELECT * FROM lark_product_costs').all(),
     getD1().prepare("SELECT last_synced_at,last_error FROM integration_status WHERE integration='lark'").first(),
+    getD1().prepare('SELECT product_id,published_at FROM lark_publish_log').all(),
   ]);
+  const published = new Map(publishLogs.results.map((row) => [String(row.product_id), String(row.published_at)]));
   return Response.json({
-    products: mapProducts(products.results as Record<string, unknown>[], prices.results as Record<string, unknown>[], variants.results as Record<string, unknown>[], costs.results as Record<string, unknown>[]),
+    products: mapProducts(products.results as Record<string, unknown>[], prices.results as Record<string, unknown>[], variants.results as Record<string, unknown>[], costs.results as Record<string, unknown>[])
+      .map((product) => ({ ...product, larkPublishedAt: published.get(product.id) ?? null })),
     lark: { configured: isLarkConfigured(), lastSyncedAt: larkStatus?.last_synced_at ?? null, lastError: larkStatus?.last_error ?? null },
   });
 }
@@ -80,6 +83,7 @@ export async function PATCH(request: Request) {
   await getD1().prepare(`INSERT INTO product_country_prices (product_id,country,currency,expected_price_minor)
     VALUES (?,?,?,?) ON CONFLICT(product_id,country) DO UPDATE SET expected_price_minor=excluded.expected_price_minor`)
     .bind(body.id, body.country, body.country === 'FI' ? 'EUR' : body.country === 'DK' ? 'DKK' : body.country === 'NO' ? 'NOK' : 'SEK', value).run();
+  await getD1().prepare('DELETE FROM lark_publish_log WHERE product_id=?').bind(body.id).run();
   return Response.json({ saved: true, larkWriteback, larkWritebackCount, writebackErrors });
 }
 
@@ -93,6 +97,7 @@ export async function DELETE(request: Request) {
     getD1().prepare('DELETE FROM product_country_prices WHERE product_id = ?').bind(id),
     getD1().prepare('DELETE FROM product_variants WHERE product_id = ?').bind(id),
     getD1().prepare('DELETE FROM price_refresh_log WHERE product_id = ?').bind(id),
+    getD1().prepare('DELETE FROM lark_publish_log WHERE product_id = ?').bind(id),
     getD1().prepare('DELETE FROM products WHERE id = ?').bind(id),
   ]);
   for (let index = 0; index < statements.length; index += 80) await getD1().batch(statements.slice(index, index + 80));

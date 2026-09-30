@@ -78,6 +78,9 @@ export async function ensureSchema() {
     db.prepare(`CREATE TABLE IF NOT EXISTS integration_status (
       integration TEXT PRIMARY KEY, last_synced_at TEXT, last_error TEXT
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS lark_publish_log (
+      product_id TEXT PRIMARY KEY, published_at TEXT NOT NULL
+    )`),
     db.prepare(`INSERT OR IGNORE INTO product_country_prices (
       product_id,country,currency,market_product_id,market_product_name,market_product_url,
       match_confidence,match_status
@@ -186,6 +189,7 @@ export async function recordRefresh(productId: string, country: CountryCode, sou
   await getD1().prepare(`INSERT INTO price_refresh_log(product_id,country,${column}) VALUES(?,?,?)
     ON CONFLICT(product_id,country) DO UPDATE SET ${column}=excluded.${column}`)
     .bind(productId, country, timestamp).run();
+  await getD1().prepare('DELETE FROM lark_publish_log WHERE product_id=?').bind(productId).run();
 }
 
 export async function getProduct(id: string) {

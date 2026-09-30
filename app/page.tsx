@@ -32,7 +32,7 @@ type Matrix = Array<Array<string | number | boolean | Date | null>>;
 type ApiPayload = { error?: string; products?: Product[]; mistoreCandidates?: MiStoreCandidate[]; marketCandidates?: MarketCandidate[];
   errors?: Array<{ message: string }>; imported?: number; updated?: number; ids?: string[]; touchedIds?: string[]; collections?: Collection[]; collection?: Collection;
   processed?: number; failedHandles?: string[]; lark?: LarkStatus; synced?: number; duplicateRows?: number;
-  larkWriteback?: string; larkWritebackCount?: number; writebackErrors?: string[] };
+  larkWriteback?: string; larkWritebackCount?: number; writebackErrors?: string[]; fieldsRemaining?: number; published?: number; createdRows?: number };
 type LarkStatus = { configured: boolean; lastSyncedAt: string | null; lastError: string | null };
 const currency: Record<Country, string> = { SE: 'SEK', DK: 'DKK', FI: 'EUR', NO: 'NOK' };
 const locale: Record<Country, string> = { SE: 'sv-SE', DK: 'da-DK', FI: 'fi-FI', NO: 'nb-NO' };
@@ -260,6 +260,18 @@ export default function Home() {
       if (allPageSelected) next.delete(member.id); else next.add(member.id);
     } setSelected(next);
   }
+  async function publishToLark(ids: string[]) {
+    let remaining = 0;
+    let published = 0;
+    do {
+      const response = await fetch('/api/lark/publish', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids }) });
+      const data = await response.json() as ApiPayload;
+      if (!response.ok) throw new Error(data.error || 'Could not sync PriceDesk to Lark.');
+      remaining = data.fieldsRemaining ?? 0;
+      published += data.published ?? 0;
+    } while (remaining > 0);
+    return published;
+  }
   const refreshIds = useCallback(async (ids: string[], countries: readonly Country[] = COUNTRIES, quiet = false) => {
     const unique = [...new Set(ids)]; if (!unique.length || refreshingRef.current) return;
     refreshingRef.current = true; setRefreshing(true); setProgress({ done: 0, total: unique.length }); let errors = 0;
@@ -276,6 +288,7 @@ export default function Home() {
           } catch { return 1; }
         }));
         errors += counts.reduce((sum, value) => sum + value, 0); setProgress({ done: index + 1, total: unique.length });
+        try { await publishToLark([id]); } catch { errors += 1; }
         await loadProducts();
       }
       if (!quiet) setNotice(errors ? `Refresh finished. ${errors} country matches need review.` : `Updated ${unique.length} products.`);
@@ -295,6 +308,8 @@ export default function Home() {
       ? { ...item, markets: { ...item.markets, [country]: { ...item.markets[country], expectedPriceMinor } } }
       : item));
     setExpectedDraft((draft) => { if (draft[key] !== input) return draft; const next = { ...draft }; delete next[key]; return next; });
+    try { await publishToLark([product.id]); }
+    catch { setNotice('Expected price saved, but PriceDesk fields could not sync to Lark. Try Sync Lark.'); return; }
     if (data.larkWriteback === 'saved') setNotice(`Expected price saved to Lark for SKU ${product.sku}.`);
     else if (data.larkWriteback === 'partial') setNotice('Saved locally, but some Lark rows could not be updated.');
     else if (data.larkWriteback === 'no_matching_sku') setNotice('Saved locally. No matching SKU row was found in Lark.');
@@ -305,7 +320,12 @@ export default function Home() {
     try {
       const response = await fetch('/api/lark/sync', { method: 'POST' }); const data = await response.json() as ApiPayload;
       if (!response.ok) throw new Error(data.error || 'Lark sync failed');
-      await loadProducts(); setNotice(`Synced ${data.synced ?? 0} Lark rows${data.duplicateRows ? `; ${data.duplicateRows} duplicate SKU rows need review` : ''}.`);
+      const refreshed = await fetch('/api/products'); const payload = await refreshed.json() as ApiPayload;
+      if (!refreshed.ok) throw new Error(payload.error || 'Could not read PriceDesk products.');
+      const ids = (payload.products ?? []).map((product) => product.id);
+      let published = 0;
+      for (let offset = 0; offset < ids.length; offset += 8) published += await publishToLark(ids.slice(offset, offset + 8));
+      await loadProducts(); setNotice(`Synced ${data.synced ?? 0} Lark cost rows and published ${published} PriceDesk SKU rows${data.duplicateRows ? `; ${data.duplicateRows} duplicate SKU rows need review` : ''}.`);
     } catch (error) { setNotice(error instanceof Error ? error.message : 'Lark sync failed'); }
     finally { setLarkSyncing(false); }
   }
@@ -515,7 +535,7 @@ export default function Home() {
   return <main className="app-shell">
     <header className="topbar"><div className="brand"><span className="brand-mark">P</span><strong>PriceDesk</strong></div><div className="topbar-actions">
       <button className="button" onClick={() => setCollectionsOpen(true)}>Collections</button>
-      <button className="button" onClick={() => void syncLark()} disabled={larkSyncing || !lark.configured}>{larkSyncing ? 'Syncing Lark…' : 'Sync Lark costs'}</button>
+      <button className="button" onClick={() => void syncLark()} disabled={larkSyncing || !lark.configured}>{larkSyncing ? 'Syncing Lark…' : 'Sync Lark'}</button>
       <button className="button" onClick={exportCsv} disabled={!selectedGroups.length}>Export CSV ({selectedGroups.length})</button>
       <button className="button primary" onClick={() => setImportOpen(true)}>Import products</button>
     </div></header>

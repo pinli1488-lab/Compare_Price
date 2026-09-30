@@ -25,6 +25,9 @@ type LarkEnvironment = {
 };
 
 type LarkRecord = { record_id: string; fields: Record<string, unknown> };
+export type LarkField = { field_id: string; field_name: string; type: number };
+
+let cachedToken: { value: string; expiresAt: number } | null = null;
 
 function settings() {
   const current = env as unknown as LarkEnvironment;
@@ -42,14 +45,16 @@ export function isLarkConfigured() {
 }
 
 async function larkToken() {
+  if (cachedToken && cachedToken.expiresAt > Date.now()) return cachedToken.value;
   const current = settings();
   if (!current.appId || !current.appSecret) throw new Error('Lark is not connected. Add LARK_APP_ID and LARK_APP_SECRET.');
   const response = await fetch('https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal', {
     method: 'POST', headers: { 'content-type': 'application/json; charset=utf-8' },
     body: JSON.stringify({ app_id: current.appId, app_secret: current.appSecret }),
   });
-  const payload = await response.json() as { code?: number; msg?: string; tenant_access_token?: string };
+  const payload = await response.json() as { code?: number; msg?: string; tenant_access_token?: string; expire?: number };
   if (!response.ok || payload.code !== 0 || !payload.tenant_access_token) throw new Error(`Lark authentication failed: ${payload.msg || response.status}`);
+  cachedToken = { value: payload.tenant_access_token, expiresAt: Date.now() + Math.max(60, (payload.expire ?? 7200) - 120) * 1000 };
   return payload.tenant_access_token;
 }
 
@@ -78,6 +83,39 @@ export async function listPriceDeskRecords() {
     pageToken = result.has_more ? result.page_token ?? '' : '';
   } while (pageToken);
   return records;
+}
+
+export async function listPriceDeskFields() {
+  const current = settings();
+  const fields: LarkField[] = [];
+  let pageToken = '';
+  do {
+    const query = new URLSearchParams({ page_size: '100' });
+    if (pageToken) query.set('page_token', pageToken);
+    const result = await larkRequest<{ items?: LarkField[]; has_more?: boolean; page_token?: string }>(
+      `/open-apis/bitable/v1/apps/${current.baseToken}/tables/${current.tableId}/fields?${query}`,
+    );
+    fields.push(...(result.items ?? []));
+    pageToken = result.has_more ? result.page_token ?? '' : '';
+  } while (pageToken);
+  return fields;
+}
+
+export async function createPriceDeskField(name: string, type: 1 | 2) {
+  const current = settings();
+  return larkRequest<{ field: LarkField }>(
+    `/open-apis/bitable/v1/apps/${current.baseToken}/tables/${current.tableId}/fields`,
+    { method: 'POST', body: JSON.stringify({ field_name: name, type }) },
+  );
+}
+
+export async function batchWritePriceDeskRecords(kind: 'create' | 'update', records: Array<{ record_id?: string; fields: Record<string, string | number | null> }>) {
+  const current = settings();
+  const suffix = kind === 'create' ? 'batch_create' : 'batch_update';
+  return larkRequest<{ records?: LarkRecord[] }>(
+    `/open-apis/bitable/v1/apps/${current.baseToken}/tables/${current.tableId}/records/${suffix}`,
+    { method: 'POST', body: JSON.stringify({ records }) },
+  );
 }
 
 export async function writeExpectedPrices(country: CountryCode, expectedPriceMinor: number | null, recordIds: string[]) {

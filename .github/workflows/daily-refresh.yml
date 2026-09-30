@@ -34,6 +34,7 @@ jobs:
             const refreshedAt = product.markets?.[country]?.autoRefreshedAt;
             return !refreshedAt || beijingDay(refreshedAt) !== today;
           });
+          const needsPublish = (product) => !product.larkPublishedAt || beijingDay(product.larkPublishedAt) !== today;
           const initial = await fetch(`${base}/api/products`);
           if (!initial.ok) throw new Error(`Product list failed: ${initial.status}`);
           const initialPayload = await initial.json();
@@ -46,6 +47,7 @@ jobs:
           const { collections = [] } = await selected.json();
           if ((initialPayload.products ?? []).length &&
               initialPayload.products.every((product) => !staleCountries(product).length) &&
+              initialPayload.products.every((product) => !needsPublish(product)) &&
               beijingDay(initialPayload.lark?.lastSyncedAt ?? 0) === today &&
               collections.every((collection) => beijingDay(collection.updatedAt) === today)) {
             console.log(`Products, Lark costs and collections are current for ${today}; skipped.`);
@@ -81,7 +83,7 @@ jobs:
           for (let offset = 0; offset < products.length && pending.length < 8; offset += 1) {
             const product = products[(start + offset) % products.length];
             const missing = staleCountries(product);
-            if (missing.length) pending.push({ product, missing });
+            if (missing.length || needsPublish(product)) pending.push({ product, missing });
           }
           for (const [index, { product, missing }] of pending.entries()) {
             const results = await Promise.all(missing.map((country) => fetch(`${base}/api/refresh`, {
@@ -93,6 +95,19 @@ jobs:
               const payload = await refresh.json().catch(() => ({}));
               if (!refresh.ok || payload.errors?.length) console.error(`Product ${index + 1} ${missing[countryIndex]} failed: ${JSON.stringify(payload.errors ?? refresh.status)}`);
             }
+          }
+          if (pending.length) {
+            let remaining = 0;
+            do {
+              const published = await fetch(`${base}/api/lark/publish`, {
+                method: 'POST', headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ ids: pending.map(({ product }) => product.id) }),
+              });
+              const result = await published.json().catch(() => ({}));
+              if (!published.ok) throw new Error(`Lark PriceDesk publish failed: ${JSON.stringify(result)}`);
+              remaining = result.fieldsRemaining ?? 0;
+              if (!remaining) console.log(`Published ${result.published} SKU rows to Lark; ${result.createdRows} new rows.`);
+            } while (remaining > 0);
           }
           console.log(`Processed ${pending.length} of ${products.length} products for ${today}; no more than eight in this run.`);
           NODE
