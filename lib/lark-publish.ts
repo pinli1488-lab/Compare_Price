@@ -147,11 +147,12 @@ export async function publishPriceDesk(ids: string[]) {
     for (const [variantIndex, variant] of variants.entries()) {
       const normalized = key(variant.sku);
       if (!normalized) continue;
-      if (seenSku.has(normalized) || (rowsBySku.get(normalized)?.length ?? 0) > 1) { duplicateSkus.add(variant.sku); continue; }
+      if (seenSku.has(normalized)) { duplicateSkus.add(variant.sku); continue; }
       seenSku.add(normalized);
       const fields = fieldsForVariant(group, variant, groupIndex, variantIndex, variants.length);
-      const recordId = rowsBySku.get(normalized)?.[0];
-      if (recordId) updates.push({ record_id: recordId, fields });
+      const recordIds = rowsBySku.get(normalized) ?? [];
+      if (recordIds.length > 1) duplicateSkus.add(variant.sku);
+      if (recordIds.length) updates.push(...recordIds.map((recordId) => ({ record_id: recordId, fields })));
       else creates.push({ fields: { [LARK_FIELDS.sku]: variant.sku, ...fields } });
     }
     for (const member of group.members) publishedProductIds.add(member.id);
