@@ -69,12 +69,13 @@ async function larkRequest<T>(path: string, init?: RequestInit): Promise<T> {
   return payload.data;
 }
 
-export async function listPriceDeskRecords() {
+export async function listPriceDeskRecords(fieldNames?: readonly string[]) {
   const current = settings();
   const records: LarkRecord[] = [];
   let pageToken = '';
   do {
     const query = new URLSearchParams({ page_size: '500' });
+    if (fieldNames?.length) query.set('field_names', JSON.stringify(fieldNames));
     if (pageToken) query.set('page_token', pageToken);
     const result = await larkRequest<{ items?: LarkRecord[]; has_more?: boolean; page_token?: string }>(
       `/open-apis/bitable/v1/apps/${current.baseToken}/tables/${current.tableId}/records?${query}`,

@@ -18,7 +18,10 @@ export async function POST() {
   await ensureSchema();
   if (!isLarkConfigured()) return Response.json({ error: 'Lark is not connected. Add LARK_APP_ID and LARK_APP_SECRET.' }, { status: 503 });
   try {
-    const records = await listPriceDeskRecords();
+    const records = await listPriceDeskRecords([
+      LARK_FIELDS.sku, LARK_FIELDS.cost, LARK_FIELDS.warehouse, ...Object.values(LARK_FIELDS.logistics),
+      LARK_FIELDS.chemicalTaxSe, LARK_FIELDS.copySwe, LARK_FIELDS.copyDk, LARK_FIELDS.fixedFee, LARK_FIELDS.rabatt,
+    ]);
     const now = new Date().toISOString();
     const rows = records.map((record) => {
       const fields = record.fields;

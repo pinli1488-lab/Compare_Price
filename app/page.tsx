@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import readXlsxFile from 'read-excel-file';
+import { requestJson } from '@/lib/client-request';
 
 const COUNTRIES = ['SE', 'DK', 'FI', 'NO'] as const;
 type Country = typeof COUNTRIES[number];
@@ -181,11 +182,15 @@ export default function Home() {
   const [expectedDraft, setExpectedDraft] = useState<Record<string, string>>({}); const fileRef = useRef<HTMLInputElement>(null);
   const [activeVariants, setActiveVariants] = useState<ActiveVariants | null>(null);
   const [lark, setLark] = useState<LarkStatus>({ configured: false, lastSyncedAt: null, lastError: null }); const [larkSyncing, setLarkSyncing] = useState(false);
+  const [larkProgress, setLarkProgress] = useState({ done: 0, total: 0 });
+  const larkCheckpoint = useRef<{ ids: string[]; done: number; published: number; costRows: number; duplicateRows: number } | null>(null);
+  const larkSyncingRef = useRef(false);
   const variantCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadProducts = useCallback(async () => {
-    const response = await fetch('/api/products', { cache: 'no-store' }); const data = await response.json() as ApiPayload;
-    if (!response.ok) throw new Error(data.error || 'Could not load products'); setProducts(data.products ?? []); if (data.lark) setLark(data.lark);
+    const data = await requestJson<ApiPayload>('/api/products', { cache: 'no-store' }, 'Load products');
+    setProducts(data.products ?? []); if (data.lark) setLark(data.lark);
+    return data;
   }, []);
   const loadCollections = useCallback(async () => {
     const response = await fetch('/api/collections', { cache: 'no-store' }); const data = await response.json() as ApiPayload;
@@ -265,9 +270,7 @@ export default function Home() {
     let remaining = 0;
     let published = 0;
     do {
-      const response = await fetch('/api/lark/publish', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids }) });
-      const data = await response.json() as ApiPayload;
-      if (!response.ok) throw new Error(data.error || 'Could not sync PriceDesk to Lark.');
+      const data = await requestJson<ApiPayload>('/api/lark/publish', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids }) }, 'Write PriceDesk to Lark');
       remaining = data.fieldsRemaining ?? 0;
       published += data.published ?? 0;
     } while (remaining > 0);
@@ -317,18 +320,33 @@ export default function Home() {
     else setNotice('Saved locally. Connect Lark to enable writeback.');
   }
   async function syncLark() {
-    if (larkSyncing) return; setLarkSyncing(true);
+    if (larkSyncingRef.current) return;
+    larkSyncingRef.current = true; setLarkSyncing(true);
     try {
-      const response = await fetch('/api/lark/sync', { method: 'POST' }); const data = await response.json() as ApiPayload;
-      if (!response.ok) throw new Error(data.error || 'Lark sync failed');
-      const refreshed = await fetch('/api/products'); const payload = await refreshed.json() as ApiPayload;
-      if (!refreshed.ok) throw new Error(payload.error || 'Could not read PriceDesk products.');
-      const ids = (payload.products ?? []).map((product) => product.id);
-      let published = 0;
-      for (let offset = 0; offset < ids.length; offset += 8) published += await publishToLark(ids.slice(offset, offset + 8));
-      await loadProducts(); setNotice(`Synced ${data.synced ?? 0} Lark cost rows and published ${published} PriceDesk SKU rows${data.duplicateRows ? `; ${data.duplicateRows} duplicate SKU rows need review` : ''}.`);
-    } catch (error) { setNotice(error instanceof Error ? error.message : 'Lark sync failed'); }
-    finally { setLarkSyncing(false); }
+      if (!larkCheckpoint.current) {
+        setLarkProgress({ done: 0, total: 0 });
+        const data = await requestJson<ApiPayload>('/api/lark/sync', { method: 'POST' }, 'Read Lark costs');
+        const payload = await loadProducts();
+        const ids = groupProducts(payload.products ?? []).map((group) => group.primary.id);
+        larkCheckpoint.current = { ids, done: 0, published: 0, costRows: data.synced ?? 0, duplicateRows: data.duplicateRows ?? 0 };
+        setLarkProgress({ done: 0, total: ids.length });
+      }
+      const job = larkCheckpoint.current;
+      while (job.done < job.ids.length) {
+        const batch = job.ids.slice(job.done, job.done + 8);
+        job.published += await publishToLark(batch);
+        job.done += batch.length;
+        setLarkProgress({ done: job.done, total: job.ids.length });
+      }
+      larkCheckpoint.current = null;
+      const message = `Synced ${job.costRows} Lark cost rows and published ${job.published} SKU rows${job.duplicateRows ? `; ${job.duplicateRows} duplicate SKU rows need review` : ''}.`;
+      try { await loadProducts(); setNotice(message); }
+      catch { setNotice(`${message} Dashboard reload failed; refresh the page when your connection recovers.`); }
+    } catch (error) {
+      const job = larkCheckpoint.current;
+      setNotice(`${error instanceof Error ? error.message : 'Lark sync failed'}${job ? ` Saved progress: ${job.done}/${job.ids.length}. Click Resume Lark.` : ''}`);
+    }
+    finally { larkSyncingRef.current = false; setLarkSyncing(false); }
   }
   async function lookup(source: 'mistore' | 'market', country: Country, value: string) {
     if (!value.trim()) return;
@@ -540,7 +558,7 @@ export default function Home() {
   return <main className="app-shell">
     <header className="topbar"><div className="brand"><span className="brand-mark">P</span><strong>PriceDesk</strong></div><div className="topbar-actions">
       <button className="button" onClick={() => setCollectionsOpen(true)}>Collections</button>
-      <button className="button" onClick={() => void syncLark()} disabled={larkSyncing || !lark.configured}>{larkSyncing ? 'Syncing Lark…' : 'Sync Lark'}</button>
+      <button className="button" onClick={() => void syncLark()} disabled={larkSyncing || !lark.configured}>{larkSyncing ? larkProgress.total ? `Syncing Lark ${larkProgress.done}/${larkProgress.total}` : 'Reading Lark costs…' : larkCheckpoint.current ? `Resume Lark ${larkProgress.done}/${larkProgress.total}` : 'Sync Lark'}</button>
       <button className="button" onClick={exportCsv} disabled={!selectedGroups.length}>Export CSV ({selectedGroups.length})</button>
       <button className="button primary" onClick={() => setImportOpen(true)}>Import products</button>
     </div></header>

@@ -128,7 +128,7 @@ export async function publishPriceDesk(ids: string[]) {
     const existingType = names.get(field.name);
     if (existingType != null && existingType !== field.type) throw new Error(`Lark field ${field.name} has an incompatible type`);
   }
-  const [products, larkRows] = await Promise.all([loadProducts(), listPriceDeskRecords()]);
+  const [products, larkRows] = await Promise.all([loadProducts(), listPriceDeskRecords([LARK_FIELDS.sku])]);
   const selected = new Set(ids);
   const groups = groupProducts(products);
   const rowsBySku = new Map<string, string[]>();
