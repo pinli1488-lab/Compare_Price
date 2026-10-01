@@ -1,6 +1,7 @@
 import { ensureSchema, getD1, mapProducts } from '@/db/store';
 import { isCountryCode } from '@/lib/countries';
 import { isLarkConfigured, writeExpectedPrices } from '@/lib/lark';
+import { publishPriceDesk } from '@/lib/lark-publish';
 
 export const runtime = 'edge';
 
@@ -55,7 +56,17 @@ export async function POST(request: Request) {
     .bind(id, item.sku, item.productName || item.sku || item.ean, item.ean, now);
   });
   for (let index = 0; index < statements.length; index += 80) await getD1().batch(statements.slice(index, index + 80));
-  return Response.json({ imported: ids.length, updated, ids, touchedIds: [...new Set(touchedIds)] });
+  const uniqueTouchedIds = [...new Set(touchedIds)];
+  await getD1().batch(uniqueTouchedIds.map((id) => getD1().prepare('DELETE FROM lark_publish_log WHERE product_id=?').bind(id)));
+  let larkPublished = 0; let larkError: string | null = null;
+  if (isLarkConfigured()) {
+    try {
+      for (let index = 0; index < uniqueTouchedIds.length; index += 8) {
+        larkPublished += (await publishPriceDesk(uniqueTouchedIds.slice(index, index + 8))).published;
+      }
+    } catch (error) { larkError = error instanceof Error ? error.message : String(error); }
+  } else larkError = 'Lark is not connected';
+  return Response.json({ imported: ids.length, updated, ids, touchedIds: uniqueTouchedIds, larkPublished, larkError });
 }
 
 export async function PATCH(request: Request) {

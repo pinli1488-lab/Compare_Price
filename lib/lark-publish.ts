@@ -155,7 +155,9 @@ export async function publishPriceDesk(ids: string[]) {
       if (recordIds.length) updates.push(...recordIds.map((recordId) => ({ record_id: recordId, fields })));
       else creates.push({ fields: { [LARK_FIELDS.sku]: variant.sku, ...fields } });
     }
-    for (const member of group.members) publishedProductIds.add(member.id);
+    if (variants.some((variant) => variant.sku.trim())) {
+      for (const member of group.members) publishedProductIds.add(member.id);
+    }
   }
   for (let offset = 0; offset < updates.length; offset += 10) await batchWritePriceDeskRecords('update', updates.slice(offset, offset + 10));
   for (let offset = 0; offset < creates.length; offset += 10) await batchWritePriceDeskRecords('create', creates.slice(offset, offset + 10));

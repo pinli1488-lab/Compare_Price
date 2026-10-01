@@ -26,13 +26,14 @@ type MiStoreCandidate = { handle: string; name: string; url: string; priceMinor:
 type MarketCandidate = { id: string; name: string; url: string; previewPrice: number | null; currency: string; confidence: number };
 type Collection = { handle: string; title: string; productHandles: string[]; updatedAt: string };
 type CollectionJob = { handle: string; title: string; phase: 'importing' | 'pricing' | 'complete'; total: number;
-  processed: number; imported: number; updated: number; priceProcessed: number; priceTotal: number; failed: number; priceErrors: number };
+  processed: number; imported: number; updated: number; priceProcessed: number; priceTotal: number; failed: number; priceErrors: number; larkErrors: number };
 type ActiveVariants = { key: string; variants: Variant[]; costs: Record<string, LarkCost>; markets: Record<Country, Market>; left: number; top: number; width: number };
 type Matrix = Array<Array<string | number | boolean | Date | null>>;
 type ApiPayload = { error?: string; products?: Product[]; mistoreCandidates?: MiStoreCandidate[]; marketCandidates?: MarketCandidate[];
   errors?: Array<{ message: string }>; imported?: number; updated?: number; ids?: string[]; touchedIds?: string[]; collections?: Collection[]; collection?: Collection;
   processed?: number; failedHandles?: string[]; lark?: LarkStatus; synced?: number; duplicateRows?: number;
-  larkWriteback?: string; larkWritebackCount?: number; writebackErrors?: string[]; fieldsRemaining?: number; published?: number; createdRows?: number };
+  larkWriteback?: string; larkWritebackCount?: number; writebackErrors?: string[]; fieldsRemaining?: number; published?: number; createdRows?: number;
+  larkPublished?: number; larkError?: string | null };
 type LarkStatus = { configured: boolean; lastSyncedAt: string | null; lastError: string | null };
 const currency: Record<Country, string> = { SE: 'SEK', DK: 'DKK', FI: 'EUR', NO: 'NOK' };
 const locale: Record<Country, string> = { SE: 'sv-SE', DK: 'da-DK', FI: 'fi-FI', NO: 'nb-NO' };
@@ -384,11 +385,11 @@ export default function Home() {
     if (collectionSyncRef.current) return setNotice('A collection is already syncing.');
     collectionSyncRef.current = true; setCollectionJobHidden(false); setCollectionsOpen(false);
     setFilter('all'); setCollectionFilter(collection.handle); setPage(1);
-    let processed = 0; let imported = 0; let updated = 0; let failed: string[] = []; let priceErrors = 0;
+    let processed = 0; let imported = 0; let updated = 0; let failed: string[] = []; let priceErrors = 0; let larkErrors = 0;
     const touched = new Set<string>();
     const progress = (phase: CollectionJob['phase'], priceProcessed = 0, priceTotal = 0) =>
       setCollectionJob({ handle: collection.handle, title: collection.title, phase, total: collection.productHandles.length,
-        processed, imported, updated, priceProcessed, priceTotal, failed: failed.length, priceErrors });
+        processed, imported, updated, priceProcessed, priceTotal, failed: failed.length, priceErrors, larkErrors });
     progress('importing');
     try {
       const importChunk = async (body: { handle: string; offset?: number; handles?: string[] }) => {
@@ -396,6 +397,7 @@ export default function Home() {
         const data = await response.json() as ApiPayload;
         if (!response.ok) throw new Error(data.error || 'Collection import failed');
         imported += data.imported ?? 0; updated += data.updated ?? 0;
+        if (data.larkError) larkErrors += 1;
         for (const id of data.ids ?? []) touched.add(id);
         return data.failedHandles ?? [];
       };
@@ -453,7 +455,9 @@ export default function Home() {
   async function addCandidate(candidate: MiStoreCandidate) {
     const response = await fetch('/api/products', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ products: [{ sku: candidate.sku, productName: candidate.name, ean: candidate.ean }] }) });
     const data = await response.json() as ApiPayload; if (!response.ok) return setNotice(data.error || 'Could not add product');
-    closeImport(); await loadProducts(); setNotice(data.imported ? 'Product added. Looking up four markets.' : 'Existing product updated.');
+    closeImport(); await loadProducts(); setNotice(data.larkError
+      ? `Product saved in PriceDesk. Lark sync will retry: ${data.larkError}`
+      : data.imported ? 'Product added to PriceDesk. Lark updates when its SKU is available. Looking up four markets.' : 'Existing product updated. Lark sync started.');
     void refreshIds(data.touchedIds ?? data.ids ?? [], COUNTRIES, true);
   }
   function setParsedMatrix(rows: Matrix) {
@@ -480,14 +484,15 @@ export default function Home() {
       ean: columns.ean >= 0 ? String(row[columns.ean] ?? '').trim() : '',
     })).filter((item) => item.sku || item.productName || item.ean);
     if (!items.length) return setNotice('Choose at least one populated SKU, name, or EAN column.');
-    let imported = 0; let updated = 0; const touchedIds: string[] = [];
+    let imported = 0; let updated = 0; let larkErrors = 0; const touchedIds: string[] = [];
     try {
-      for (let index = 0; index < items.length; index += 30) {
-        const response = await fetch('/api/products', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ products: items.slice(index, index + 30) }) });
+      for (let index = 0; index < items.length; index += 8) {
+        const response = await fetch('/api/products', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ products: items.slice(index, index + 8) }) });
         const data = await response.json() as ApiPayload; if (!response.ok) throw new Error(data.error || 'Import failed');
         imported += data.imported ?? 0; updated += data.updated ?? 0; touchedIds.push(...(data.touchedIds ?? []));
+        if (data.larkError) larkErrors += 1;
       }
-      closeImport(); await loadProducts(); setNotice(`Imported ${imported} new products and updated ${updated} existing products. Price lookup started.`);
+      closeImport(); await loadProducts(); setNotice(`Imported ${imported} new products and updated ${updated} existing products. Price lookup started.${larkErrors ? ` ${larkErrors} Lark batches will retry.` : ' Lark sync started; rows without a SKU will follow after MiStore identification.'}`);
       void refreshIds(touchedIds, COUNTRIES, true);
     } catch (error) { setNotice(error instanceof Error ? error.message : 'Import failed'); await loadProducts(); }
   }
@@ -592,7 +597,7 @@ export default function Home() {
           : `Complete: ${collectionJob.imported} added, ${collectionJob.updated} updated`}</p>
         <progress value={collectionJob.phase === 'importing' ? collectionJob.processed : collectionJob.priceProcessed}
           max={collectionJob.phase === 'importing' ? Math.max(1, collectionJob.total) : Math.max(1, collectionJob.priceTotal)}/>
-        {collectionJob.phase === 'complete' && <small>{collectionJob.failed ? `${collectionJob.failed} products could not be imported. ` : ''}{collectionJob.priceErrors ? `${collectionJob.priceErrors} country prices need review.` : 'All available prices checked.'}</small>}
+        {collectionJob.phase === 'complete' && <small>{collectionJob.failed ? `${collectionJob.failed} products could not be imported. ` : ''}{collectionJob.priceErrors ? `${collectionJob.priceErrors} country prices need review. ` : 'All available prices checked. '}{collectionJob.larkErrors ? `${collectionJob.larkErrors} Lark batches will retry.` : 'Lark rows updated.'}</small>}
         {collectionJob.phase === 'complete' && <button className="sync-dismiss" onClick={() => setCollectionJob(null)}>Dismiss</button>}</>}
     </aside>}
     {notice && <div className="toast"><span>{notice}</span><button onClick={() => setNotice('')} aria-label="Dismiss notification">×</button></div>}

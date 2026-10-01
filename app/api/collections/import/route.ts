@@ -1,5 +1,7 @@
 import { ensureSchema, getD1 } from '@/db/store';
 import { fetchMiStoreProduct } from '@/lib/mistore';
+import { isLarkConfigured } from '@/lib/lark';
+import { publishPriceDesk } from '@/lib/lark-publish';
 
 export const runtime = 'edge';
 
@@ -68,5 +70,12 @@ export async function POST(request: Request) {
       .bind(id, JSON.stringify(product.variants)));
   }
   await db.batch(statements);
-  return Response.json({ processed: selected.length, imported, updated, ids: [...ids], failedHandles, total: allHandles.length });
+  await db.batch([...ids].map((id) => db.prepare('DELETE FROM lark_publish_log WHERE product_id=?').bind(id)));
+  let larkPublished = 0; let larkError: string | null = null;
+  if (isLarkConfigured()) {
+    try { larkPublished = (await publishPriceDesk([...ids])).published; }
+    catch (error) { larkError = error instanceof Error ? error.message : String(error); }
+  } else larkError = 'Lark is not connected';
+  return Response.json({ processed: selected.length, imported, updated, ids: [...ids], failedHandles, total: allHandles.length,
+    larkPublished, larkError });
 }
