@@ -1,4 +1,5 @@
 import { ensureSchema, getD1 } from '@/db/store';
+import { databaseErrorResponse } from '@/lib/database-error';
 
 export const runtime = 'edge';
 
@@ -37,11 +38,13 @@ async function fetchCollection(handle: string) {
 }
 
 export async function GET() {
+  try {
   await ensureSchema();
   const result = await getD1().prepare('SELECT handle,title,product_handles_json,updated_at FROM selected_collections ORDER BY title').all();
   return Response.json({ collections: result.results.map((row) => ({
     handle: String(row.handle), title: String(row.title), productHandles: JSON.parse(String(row.product_handles_json)) as string[], updatedAt: String(row.updated_at),
   })) });
+  } catch (error) { return databaseErrorResponse(error); }
 }
 
 export async function POST(request: Request) {

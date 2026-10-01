@@ -4,10 +4,29 @@ import { isLarkConfigured, writeExpectedPrices } from '@/lib/lark';
 import { publishPriceDesk } from '@/lib/lark-publish';
 import { classifyInternalCollection } from '@/lib/internal-collections';
 import { productDisplayName } from '@/lib/product-name';
+import { databaseErrorResponse } from '@/lib/database-error';
 
 export const runtime = 'edge';
 
-export async function GET() {
+export async function GET(request: Request) {
+  const cache = (caches as CacheStorage & { default: Cache }).default;
+  const key = new Request(new URL('/api/products?dashboard-cache=v1', request.url));
+  if (new URL(request.url).searchParams.get('fresh') !== '1' && cache) {
+    const cached = await cache.match(key);
+    if (cached) return cached;
+  }
+  try {
+    const response = await readProducts();
+    if (cache) {
+      const cached = new Response(response.clone().body, { headers: response.headers });
+      cached.headers.set('Cache-Control', 'public, max-age=300');
+      await cache.put(key, cached).catch(() => {});
+    }
+    return response;
+  } catch (error) { return databaseErrorResponse(error); }
+}
+
+async function readProducts() {
   await ensureSchema();
   const [products, prices, variants, costs, larkStatus, publishLogs, categoryRows] = await Promise.all([
     getD1().prepare('SELECT id,sku,product_name,ean,created_at FROM products ORDER BY created_at ASC, rowid ASC').all(),
@@ -30,7 +49,7 @@ export async function GET() {
           internalCategory: override === 'uncategorized' ? null : override ?? classifyInternalCollection(productDisplayName(product)) };
       }),
     lark: { configured: isLarkConfigured(), lastSyncedAt: larkStatus?.last_synced_at ?? null, lastError: larkStatus?.last_error ?? null },
-  });
+  }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
 export async function POST(request: Request) {

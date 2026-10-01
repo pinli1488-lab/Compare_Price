@@ -8,10 +8,13 @@ export async function requestJson<T>(url: string, init: RequestInit = {}, label 
       const response = await fetch(url, { ...init, signal: controller.signal });
       retryable = response.status === 429 || response.status >= 500;
       const body = await response.text();
-      let data: T & { error?: string };
+      let data: T & { error?: string; retryable?: boolean };
       try { data = JSON.parse(body); }
       catch { throw new Error(`${label}: server returned an invalid response (HTTP ${response.status}).`); }
-      if (!response.ok) throw new Error(`${label}: ${data.error || `HTTP ${response.status}`}`);
+      if (!response.ok) {
+        if (data.retryable === false) retryable = false;
+        throw new Error(`${label}: ${data.error || `HTTP ${response.status}`}`);
+      }
       return data;
     } catch (error) {
       if (error instanceof TypeError || (error instanceof Error && error.name === 'AbortError')) retryable = true;

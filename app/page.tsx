@@ -170,6 +170,7 @@ function groupProducts(products: Product[]): Group[] {
 
 export default function Home() {
   const [products, setProducts] = useState<Product[]>([]); const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [query, setQuery] = useState(''); const [filter, setFilter] = useState('all'); const [filterCountry, setFilterCountry] = useState<Country | 'ALL'>('ALL');
   const [collections, setCollections] = useState<Collection[]>([]); const [collectionFilter, setCollectionFilter] = useState('ALL');
   const [collectionsOpen, setCollectionsOpen] = useState(false); const [collectionInput, setCollectionInput] = useState(''); const [collectionSaving, setCollectionSaving] = useState(false);
@@ -194,21 +195,28 @@ export default function Home() {
   const larkSyncingRef = useRef(false);
   const variantCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const loadProducts = useCallback(async () => {
-    const data = await requestJson<ApiPayload>('/api/products', { cache: 'no-store' }, 'Load products');
-    setProducts(data.products ?? []); if (data.lark) setLark(data.lark);
-    return data;
+  const loadProducts = useCallback(async (fresh = true) => {
+    try {
+      const data = await requestJson<ApiPayload>(fresh ? '/api/products?fresh=1' : '/api/products', { cache: 'no-store' }, 'Load products');
+      if (!Array.isArray(data.products)) throw new Error('Load products: invalid product data. Existing rows have been retained.');
+      setProducts(data.products); if (data.lark) setLark(data.lark);
+      setLoadError('');
+      return data;
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : String(error));
+      throw error;
+    }
   }, []);
   const loadCollections = useCallback(async () => {
-    const response = await fetch('/api/collections', { cache: 'no-store' }); const data = await response.json() as ApiPayload;
-    if (!response.ok) throw new Error(data.error || 'Could not load collections'); setCollections(data.collections ?? []);
+    const data = await requestJson<ApiPayload>('/api/collections', { cache: 'no-store' }, 'Load collections');
+    setCollections(data.collections ?? []);
   }, []);
-  useEffect(() => { queueMicrotask(() => { void loadProducts().catch((error) => setNotice(String(error))).finally(() => setLoading(false)); }); }, [loadProducts]);
+  useEffect(() => { queueMicrotask(() => { void loadProducts(false).catch((error) => setNotice(String(error))).finally(() => setLoading(false)); }); }, [loadProducts]);
   useEffect(() => {
     const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') void loadProducts().catch(() => {});
-    }, 60_000);
-    const onVisible = () => { if (document.visibilityState === 'visible') void loadProducts().catch(() => {}); };
+      if (document.visibilityState === 'visible') void loadProducts(false).catch(() => {});
+    }, 300_000);
+    const onVisible = () => { if (document.visibilityState === 'visible') void loadProducts(false).catch(() => {}); };
     document.addEventListener('visibilitychange', onVisible);
     return () => { window.clearInterval(timer); document.removeEventListener('visibilitychange', onVisible); };
   }, [loadProducts]);
@@ -615,14 +623,15 @@ export default function Home() {
       <button className="button" disabled={refreshing || !selected.size} onClick={() => void refreshIds([...selected])}>{refreshing ? `Refreshing ${progress.done}/${progress.total}` : `Refresh selected (${selectedGroups.length})`}</button>
       {selected.size > 0 && <button className="button" onClick={() => { setSelected(new Set()); lastSelectedIndex.current = null; }}>Clear selection</button>}
       {selected.size > 0 && <button className="delete-button" onClick={deleteSelected}>Delete selected</button>}
-      <div className="toolbar-meta"><span>Lark: {lark.configured ? dateLabel(lark.lastSyncedAt) : 'Not connected'}</span><span>Manual (Stockholm): {dateLabel(lastManual)}</span><span title="Variants of the same MiStore product share one table row">Automatic (Beijing): {dateLabel(lastAuto, 'Asia/Shanghai')} · {autoCompletedGroups}/{groups.length} product rows · {checkedTodayIds.size}/{products.length} records checked today</span></div>
+      <div className="toolbar-meta"><span>Lark: {loadError && !products.length ? 'Status unavailable' : lark.configured ? dateLabel(lark.lastSyncedAt) : 'Not connected'}</span><span>Manual (Stockholm): {dateLabel(lastManual)}</span><span title="Variants of the same MiStore product share one table row">Automatic (Beijing): {dateLabel(lastAuto, 'Asia/Shanghai')} · {autoCompletedGroups}/{groups.length} product rows · {checkedTodayIds.size}/{products.length} records checked today</span></div>
       <div className="pager"><span>{filtered.length ? `${(safePage - 1) * 50 + 1}–${Math.min(safePage * 50, filtered.length)}` : '0'} / {filtered.length}</span><button disabled={safePage <= 1} onClick={() => setPage(safePage - 1)} aria-label="Previous page">‹</button><span>{safePage} / {pageCount}</span><button disabled={safePage >= pageCount} onClick={() => setPage(safePage + 1)} aria-label="Next page">›</button></div>
+      {loadError && <div className="load-error" role="alert"><span>{loadError}{!!products.length && ' Showing previously loaded products.'}</span><button className="button" disabled={loading} onClick={() => { setLoading(true); void loadProducts(false).catch(() => {}).finally(() => setLoading(false)); }}>Retry loading</button></div>}
     </section>
     <section className="grid-wrap" onScrollCapture={() => setActiveVariants(null)}><table className="price-grid"><colgroup><col style={{ width: 36 }}/><col style={{ width: 235 }}/>{COUNTRIES.flatMap((country) => [<col key={`${country}-own`} style={{ width: 145 }}/>, <col key={`${country}-market`} style={{ width: 145 }}/>, <col key={`${country}-second`} style={{ width: 145 }}/>, <col key={`${country}-expected`} style={{ width: 145 }}/>, <col key={`${country}-cost`} style={{ width: 145 }}/>])}<col style={{ width: 126 }}/></colgroup><thead><tr>
       <th rowSpan={2} className="check"><input aria-label="Select current page" type="checkbox" checked={allPageSelected} onChange={togglePage}/></th><th rowSpan={2} className="product-head">No. / SKU / Product</th>
       {COUNTRIES.map((country) => <th key={country} colSpan={5} className="country-head">{country} <small>({currency[country]})</small></th>)}<th rowSpan={2} className="action-head">Actions</th>
     </tr><tr>{COUNTRIES.flatMap((country) => [<th key={`${country}-own`}>MiStore Price</th>, <th key={`${country}-market`}>Lowest Price<br/>in Market</th>, <th key={`${country}-second`}>Second Lowest<br/>Price</th>, <th key={`${country}-expected`}>Expected Price</th>, <th key={`${country}-cost`}>Cost Price</th>])}</tr></thead><tbody>
-      {loading ? <tr><td colSpan={23} className="state-row">Loading products…</td></tr> : !pageRows.length ? <tr><td colSpan={23} className="state-row">No products match this filter.</td></tr> : pageRows.map((group) => {
+      {loading ? <tr><td colSpan={23} className="state-row">Loading products…</td></tr> : !pageRows.length ? <tr><td colSpan={23} className="state-row">{loadError || 'No products match this filter.'}</td></tr> : pageRows.map((group) => {
         const product = group.primary; const groupIndex = filtered.findIndex((item) => item.key === group.key); const checked = group.members.every((member) => selected.has(member.id));
         return <tr key={group.key}><td className="check"><input type="checkbox" checked={checked} readOnly onClick={(event) => toggleGroup(group, groupIndex, event.shiftKey)} aria-label={`Select product ${numbers.get(group.key)}`}/></td>
           <td className="product-cell"><strong><span className="row-number">{numbers.get(group.key)}.</span> {product.sku || group.variants[0]?.sku || '—'}</strong><span title={productDisplayName(product)}>{productDisplayName(product)}</span>
