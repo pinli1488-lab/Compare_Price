@@ -2,12 +2,14 @@ import { ensureSchema, getD1, mapProducts } from '@/db/store';
 import { isCountryCode } from '@/lib/countries';
 import { isLarkConfigured, writeExpectedPrices } from '@/lib/lark';
 import { publishPriceDesk } from '@/lib/lark-publish';
+import { classifyInternalCollection } from '@/lib/internal-collections';
+import { productDisplayName } from '@/lib/product-name';
 
 export const runtime = 'edge';
 
 export async function GET() {
   await ensureSchema();
-  const [products, prices, variants, costs, larkStatus, publishLogs] = await Promise.all([
+  const [products, prices, variants, costs, larkStatus, publishLogs, categoryRows] = await Promise.all([
     getD1().prepare('SELECT id,sku,product_name,ean,created_at FROM products ORDER BY created_at ASC, rowid ASC').all(),
     getD1().prepare(`SELECT p.*, l.manual_at, l.auto_at FROM product_country_prices p
       LEFT JOIN price_refresh_log l ON l.product_id=p.product_id AND l.country=p.country`).all(),
@@ -15,11 +17,18 @@ export async function GET() {
     getD1().prepare('SELECT * FROM lark_product_costs').all(),
     getD1().prepare("SELECT last_synced_at,last_error FROM integration_status WHERE integration='lark'").first(),
     getD1().prepare('SELECT product_id,published_at FROM lark_publish_log').all(),
+    getD1().prepare('SELECT product_id,category FROM product_collection_overrides').all(),
   ]);
   const published = new Map(publishLogs.results.map((row) => [String(row.product_id), String(row.published_at)]));
+  const categories = new Map(categoryRows.results.map((row) => [String(row.product_id), String(row.category)]));
   return Response.json({
     products: mapProducts(products.results as Record<string, unknown>[], prices.results as Record<string, unknown>[], variants.results as Record<string, unknown>[], costs.results as Record<string, unknown>[])
-      .map((product) => ({ ...product, larkPublishedAt: published.get(product.id) ?? null })),
+      .map((product) => {
+        const override = categories.get(product.id) ?? null;
+        return { ...product, larkPublishedAt: published.get(product.id) ?? null,
+          internalCategoryOverride: override,
+          internalCategory: override === 'uncategorized' ? null : override ?? classifyInternalCollection(productDisplayName(product)) };
+      }),
     lark: { configured: isLarkConfigured(), lastSyncedAt: larkStatus?.last_synced_at ?? null, lastError: larkStatus?.last_error ?? null },
   });
 }

@@ -19,3 +19,4 @@
 @media(max-width:1200px){.toolbar-meta{margin-left:0}.pager{margin-left:auto}}
 @media(max-width:700px){.grid-wrap{width:calc(100% - 24px);margin:0 12px}.toolbar{padding:10px 12px}.search-box{width:100%}.toolbar-meta{width:100%}.pager{margin-left:0}.batch-import{grid-template-columns:1fr}.mapping{display:block}.mapping-fields{flex-wrap:wrap;margin-bottom:12px}}
 .price-link.no-link{text-decoration:none}.price-cell small.profit-line{margin-top:3px}.expected-cell{height:82px!important}
+.internal-category-controls{display:flex;align-items:center;flex-wrap:wrap;gap:12px;padding:14px 22px;border-bottom:1px solid var(--line);font-size:12px}.internal-category-controls label{display:flex;align-items:center;gap:10px}.internal-category-controls select{padding:7px 10px;border:1px solid #ddd;border-radius:6px;background:#fff}.internal-category-controls span{color:var(--muted)}.collection-section-heading{margin:20px 22px 0;font-size:14px}

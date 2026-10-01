@@ -68,6 +68,9 @@ export async function ensureSchema() {
       handle TEXT PRIMARY KEY, title TEXT NOT NULL, product_handles_json TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS product_collection_overrides (
+      product_id TEXT PRIMARY KEY, category TEXT NOT NULL, updated_at TEXT NOT NULL
+    )`),
     db.prepare(`CREATE TABLE IF NOT EXISTS lark_product_costs (
       record_id TEXT PRIMARY KEY, sku TEXT NOT NULL, sku_normalized TEXT NOT NULL,
       cost_sek_minor INTEGER, warehouse_sek_minor INTEGER,

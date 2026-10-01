@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import readXlsxFile from 'read-excel-file';
 import { requestJson } from '@/lib/client-request';
 import { productDisplayName } from '@/lib/product-name';
+import { INTERNAL_COLLECTIONS, type InternalCollectionId, type CollectionOverride } from '@/lib/internal-collections';
 
 const COUNTRIES = ['SE', 'DK', 'FI', 'NO'] as const;
 type Country = typeof COUNTRIES[number];
@@ -22,8 +23,12 @@ type Market = {
   secondLowPriceMinor: number | null; secondLowMerchant: string | null;
   expectedPriceMinor: number | null; updatedAt: string | null; manualRefreshedAt: string | null; autoRefreshedAt: string | null;
 };
-type Product = { id: string; sku: string; productName: string; ean: string; createdAt: string; markets: Record<Country, Market>; variants: Record<Country, Variant[]>; larkCosts: Record<string, LarkCost> };
+type Product = { id: string; sku: string; productName: string; ean: string; createdAt: string; markets: Record<Country, Market>; variants: Record<Country, Variant[]>; larkCosts: Record<string, LarkCost>; internalCategory: InternalCollectionId | null; internalCategoryOverride: CollectionOverride };
 type Group = { key: string; primary: Product; members: Product[]; variants: Variant[] };
+function groupCategory(group: Group): InternalCollectionId | null {
+  const override = group.members.find((member) => member.internalCategoryOverride != null)?.internalCategoryOverride;
+  return override === 'uncategorized' ? null : override ?? group.primary.internalCategory;
+}
 type MiStoreCandidate = { handle: string; name: string; url: string; priceMinor: number; currency: string; sku: string; ean: string; variantTitle: string; confidence: number };
 type MarketCandidate = { id: string; name: string; url: string; previewPrice: number | null; currency: string; confidence: number };
 type Collection = { handle: string; title: string; productHandles: string[]; updatedAt: string };
@@ -168,6 +173,7 @@ export default function Home() {
   const [query, setQuery] = useState(''); const [filter, setFilter] = useState('all'); const [filterCountry, setFilterCountry] = useState<Country | 'ALL'>('ALL');
   const [collections, setCollections] = useState<Collection[]>([]); const [collectionFilter, setCollectionFilter] = useState('ALL');
   const [collectionsOpen, setCollectionsOpen] = useState(false); const [collectionInput, setCollectionInput] = useState(''); const [collectionSaving, setCollectionSaving] = useState(false);
+  const [categorySaving, setCategorySaving] = useState(false);
   const [collectionJob, setCollectionJob] = useState<CollectionJob | null>(null); const [collectionJobHidden, setCollectionJobHidden] = useState(false);
   const collectionSyncRef = useRef(false);
   const [page, setPage] = useState(1); const [selected, setSelected] = useState<Set<string>>(new Set()); const lastSelectedIndex = useRef<number | null>(null);
@@ -224,11 +230,21 @@ export default function Home() {
   }
 
   const groups = useMemo(() => groupProducts(products), [products]);
+  const categoryCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const group of groups) {
+      const category = groupCategory(group) ?? 'uncategorized';
+      counts.set(category, (counts.get(category) ?? 0) + 1);
+    }
+    return counts;
+  }, [groups]);
   const numbers = useMemo(() => new Map(groups.map((group, index) => [group.key, index + 1])), [groups]);
   const filtered = useMemo(() => groups.filter((group) => {
     const text = [group.primary.productName, ...group.variants.flatMap((variant) => [variant.sku, variant.ean, variant.title])].join(' ').toLowerCase();
     if (query && !query.toLowerCase().split(/\s+/).every((term) => text.includes(term))) return false;
-    if (collectionFilter !== 'ALL') {
+    if (collectionFilter.startsWith('internal:')) {
+      if ((groupCategory(group) ?? 'uncategorized') !== collectionFilter.slice('internal:'.length)) return false;
+    } else if (collectionFilter !== 'ALL') {
       const collection = collections.find((item) => item.handle === collectionFilter);
       if (!collection || !group.members.some((member) => member.markets.SE.mistoreHandle && collection.productHandles.includes(member.markets.SE.mistoreHandle))) return false;
     }
@@ -253,6 +269,23 @@ export default function Home() {
   })).map((product) => product.id));
   const autoCompletedGroups = groups.filter((group) => group.members.every((member) => checkedTodayIds.has(member.id))).length;
   const activeMatch = matchProduct ? products.find((product) => product.id === matchProduct.id) ?? matchProduct : null;
+  const activeGroup = activeMatch ? groups.find((group) => group.members.some((member) => member.id === activeMatch.id)) : undefined;
+  const activeCategoryOverride = activeGroup?.members.find((member) => member.internalCategoryOverride != null)?.internalCategoryOverride ?? '';
+
+  async function saveInternalCategory(value: string) {
+    if (!activeGroup || categorySaving) return;
+    setCategorySaving(true);
+    try {
+      const ids = activeGroup.members.map((member) => member.id);
+      for (let index = 0; index < ids.length; index += 8) await requestJson<ApiPayload>('/api/internal-collections', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ids: ids.slice(index, index + 8), category: value || null }),
+      }, 'Save internal collection');
+      await loadProducts();
+      setNotice('Internal collection saved.');
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'Could not save internal collection.'); }
+    finally { setCategorySaving(false); }
+  }
 
   function closeImport() { setImportOpen(false); setManualQuery(''); setManualCandidates([]); setMatrix([]); setPasteText(''); if (fileRef.current) fileRef.current.value = ''; }
   function toggleGroup(group: Group, index: number, shift: boolean) {
@@ -578,7 +611,7 @@ export default function Home() {
       <label className="search-box"><input value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder="Search SKU, product name or EAN" /></label>
       <select aria-label="Price status" value={filter} onChange={(event) => { setFilter(event.target.value); setPage(1); }}><option value="all">All prices</option><option value="above">Above market</option><option value="missing-market">Missing market price</option><option value="pending">Needs review</option></select>
       <select aria-label="Country filter" value={filterCountry} onChange={(event) => { setFilterCountry(event.target.value as Country | 'ALL'); setPage(1); }}><option value="ALL">All countries</option>{COUNTRIES.map((country) => <option key={country}>{country}</option>)}</select>
-      <select aria-label="Collection filter" value={collectionFilter} onChange={(event) => { setCollectionFilter(event.target.value); setPage(1); }}><option value="ALL">All collections</option>{collections.map((collection) => <option key={collection.handle} value={collection.handle}>{collection.title}</option>)}</select>
+      <select aria-label="Collection filter" value={collectionFilter} onChange={(event) => { setCollectionFilter(event.target.value); setPage(1); }}><option value="ALL">All collections</option><optgroup label="Internal collections">{INTERNAL_COLLECTIONS.map((category) => <option key={category.id} value={`internal:${category.id}`}>{category.title} ({categoryCounts.get(category.id) ?? 0})</option>)}<option value="internal:uncategorized">Uncategorized ({categoryCounts.get('uncategorized') ?? 0})</option></optgroup>{!!collections.length && <optgroup label="MiStore collections">{collections.map((collection) => <option key={collection.handle} value={collection.handle}>{collection.title}</option>)}</optgroup>}</select>
       <button className="button" disabled={refreshing || !selected.size} onClick={() => void refreshIds([...selected])}>{refreshing ? `Refreshing ${progress.done}/${progress.total}` : `Refresh selected (${selectedGroups.length})`}</button>
       {selected.size > 0 && <button className="button" onClick={() => { setSelected(new Set()); lastSelectedIndex.current = null; }}>Clear selection</button>}
       {selected.size > 0 && <button className="delete-button" onClick={deleteSelected}>Delete selected</button>}
@@ -631,7 +664,9 @@ export default function Home() {
         {collectionJob.phase === 'complete' && <button className="sync-dismiss" onClick={() => setCollectionJob(null)}>Dismiss</button>}</>}
     </aside>}
     {notice && <div className="toast"><span>{notice}</span><button onClick={() => setNotice('')} aria-label="Dismiss notification">×</button></div>}
-    {collectionsOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setCollectionsOpen(false); }}><section className="modal collections-modal"><header><div><h2>Selected MiStore collections</h2><p>Add only the collections your team uses. Product membership comes from MiStore.se.</p></div><button className="close" onClick={() => setCollectionsOpen(false)}>Close</button></header>
+    {collectionsOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setCollectionsOpen(false); }}><section className="modal collections-modal"><header><div><h2>Collections</h2><p>New products enter internal collections automatically. Use Match / Edit to change product collections.</p></div><button className="close" onClick={() => setCollectionsOpen(false)}>Close</button></header>
+      <div className="collection-list">{[...INTERNAL_COLLECTIONS, { id: 'uncategorized', title: 'Uncategorized' }].map((category) => <div key={category.id} className="collection-item"><div><strong>{category.title}</strong><small>{categoryCounts.get(category.id) ?? 0} product rows</small></div><button className="button" onClick={() => { setCollectionFilter(`internal:${category.id}`); setPage(1); setCollectionsOpen(false); }}>View products</button></div>)}</div>
+      <h3 className="collection-section-heading">MiStore collections</h3>
       <div className="manual-search"><input value={collectionInput} onChange={(event) => setCollectionInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void saveCollection(); }} placeholder="MiStore.se collection URL or handle"/><button className="button primary" onClick={() => void saveCollection()} disabled={collectionSaving || collectionSyncRef.current}>{collectionSaving ? 'Reading…' : 'Add / sync'}</button></div>
       <div className="collection-list">{collections.length ? collections.map((collection) => <div key={collection.handle} className="collection-item"><div><strong>{collection.title}</strong><small>{collection.productHandles.length} products · Updated {dateLabel(collection.updatedAt)} Stockholm</small></div><div><button className="button" onClick={() => void saveCollection(collection.handle)} disabled={collectionSaving || collectionSyncRef.current}>Sync products</button><button className="remove-match" onClick={() => void removeCollection(collection.handle)} disabled={collectionSyncRef.current}>Remove</button></div></div>) : <p className="candidate-empty">No collections selected yet.</p>}</div>
     </section></div>}
@@ -642,6 +677,7 @@ export default function Home() {
       {!!matrix.length && <div className="mapping"><div><label className="header-toggle"><input type="checkbox" checked={hasHeader} onChange={(event) => setHasHeader(event.target.checked)}/> First row contains column names</label><p className="import-preview">{Math.max(0, matrix.length - (hasHeader ? 1 : 0))} data rows · Preview: {matrix.slice(hasHeader ? 1 : 0, (hasHeader ? 1 : 0) + 2).map((row) => row.join(' | ')).join(' / ')}</p><div className="mapping-fields">{(['sku', 'name', 'ean'] as const).map((field) => <label key={field}>{field === 'name' ? 'Product Name' : field.toUpperCase()}<select value={columns[field]} onChange={(event) => setColumns({ ...columns, [field]: Number(event.target.value) })}><option value={-1}>Do not use</option>{(matrix[0] ?? []).map((value, index) => <option key={index} value={index}>{hasHeader ? String(value || `Column ${index + 1}`) : `Column ${index + 1}`}</option>)}</select></label>)}</div></div><button className="button primary" onClick={importRows}>Import rows</button></div>}
     </section></div>}
     {activeMatch && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setMatchProduct(null); }}><section className="modal match-modal"><header><div><h2>Match or edit products</h2><p>{activeMatch.productName} · {activeMatch.sku || activeMatch.ean}</p></div><button className="close" onClick={() => setMatchProduct(null)}>Close</button></header>
+      <div className="internal-category-controls"><label>Internal collection <select value={activeCategoryOverride} disabled={categorySaving} onChange={(event) => void saveInternalCategory(event.target.value)}><option value="">Automatic</option>{INTERNAL_COLLECTIONS.map((category) => <option key={category.id} value={category.id}>{category.title}</option>)}<option value="uncategorized">Uncategorized</option></select></label><span>{categorySaving ? 'Saving…' : `Current: ${INTERNAL_COLLECTIONS.find((category) => category.id === (activeGroup && groupCategory(activeGroup)))?.title ?? 'Uncategorized'}`}</span></div>
       <nav className="country-tabs">{COUNTRIES.map((country) => <button key={country} className={matchCountry === country ? 'active' : ''} onClick={() => changeCountry(country)}>{country}</button>)}</nav>
       <div className="match-columns"><section><h3>MiStore product</h3><p className="current-match">Current: {activeMatch.markets[matchCountry].mistoreName || 'Not matched'}</p><div className="match-search"><input value={mistoreQuery} onChange={(event) => setMistoreQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void lookup('mistore', matchCountry, mistoreQuery); }} placeholder="Name, SKU, EAN or MiStore URL"/><button className="button" onClick={() => void lookup('mistore', matchCountry, mistoreQuery)}>Search</button></div><button className="remove-match" onClick={() => void removeMatch('mistore')} disabled={!activeMatch.markets[matchCountry].mistoreHandle}>Remove MiStore match</button><div className="candidate-list">{mistoreLoading ? <p className="candidate-empty">Searching…</p> : mistoreCandidates.length ? mistoreCandidates.map((candidate) => <button key={`${candidate.handle}|${candidate.sku}`} className="candidate" onClick={() => void chooseMiStore(candidate)}><div><strong>{candidate.name}</strong><small>SKU {candidate.sku || '—'} · EAN {candidate.ean || '—'}</small></div><span>{money(candidate.priceMinor, matchCountry)}</span></button>) : <p className="candidate-empty">No results. Try a broader name or paste the product URL.</p>}</div></section>
       <section><h3>Prisjakt product</h3><p className="current-match">Current: {activeMatch.markets[matchCountry].marketProductName || 'Not matched'}</p><div className="match-search"><input value={marketQuery} onChange={(event) => setMarketQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void lookup('market', matchCountry, marketQuery); }} placeholder="Name, EAN, product URL or ID"/><button className="button" onClick={() => void lookup('market', matchCountry, marketQuery)}>Search</button></div><button className="remove-match" onClick={() => void removeMatch('market')} disabled={!activeMatch.markets[matchCountry].marketProductId}>Remove Prisjakt match</button><div className="candidate-list">{marketLoading ? <p className="candidate-empty">Searching…</p> : marketCandidates.length ? marketCandidates.map((candidate) => <button key={candidate.id} className="candidate" onClick={() => void chooseMarket(candidate)}><div><strong>{candidate.name}</strong><small>Product ID {candidate.id} · {candidate.previewPrice ?? '—'} {candidate.currency}</small></div><span>{candidate.confidence}%</span></button>) : <p className="candidate-empty">No results. Try the EAN or paste the Prisjakt product page URL.</p>}</div></section></div>
