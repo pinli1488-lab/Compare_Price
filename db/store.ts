@@ -86,8 +86,6 @@ export async function ensureSchema() {
       match_confidence,match_status
     ) SELECT id,'SE','SEK',matched_product_id,matched_product_name,matched_product_url,
       match_confidence,match_status FROM products`),
-    db.prepare(`UPDATE product_country_prices SET low_price_minor=NULL, low_merchant=NULL, low_url=NULL, updated_at=NULL
-      WHERE mistore_handle IS NULL AND (low_price_minor IS NOT NULL OR low_merchant IS NOT NULL OR low_url IS NOT NULL)`),
     db.prepare('CREATE INDEX IF NOT EXISTS idx_country_prices_updated ON product_country_prices(updated_at)'),
     db.prepare('CREATE INDEX IF NOT EXISTS idx_country_prices_status ON product_country_prices(match_status)'),
     db.prepare('CREATE INDEX IF NOT EXISTS idx_lark_costs_sku ON lark_product_costs(sku_normalized)'),
