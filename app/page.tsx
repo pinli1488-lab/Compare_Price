@@ -323,23 +323,30 @@ export default function Home() {
   const refreshIds = useCallback(async (ids: string[], countries: readonly Country[] = COUNTRIES, quiet = false) => {
     const unique = [...new Set(ids)]; if (!unique.length || refreshingRef.current) return;
     refreshingRef.current = true; setRefreshing(true); setProgress({ done: 0, total: unique.length }); let errors = 0;
+    let skippedCountries = 0; let updatedProducts = 0; let costsSynced = false;
     try {
-      try {
-        const larkResponse = await fetch('/api/lark/sync', { method: 'POST' });
-        if (larkResponse.ok) await loadProducts();
-      } catch { /* Price refresh can continue when the cost source is temporarily unavailable. */ }
       for (const [index, id] of unique.entries()) {
         const counts = await Promise.all(countries.map(async (country) => {
           try {
             const response = await fetch('/api/refresh', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: [id], country, source: 'manual' }) });
-            const data = await response.json() as ApiPayload; return data.errors?.length ?? (response.ok ? 0 : 1);
-          } catch { return 1; }
+            const data = await response.json() as { errors?: unknown[]; updated?: string[]; skipped?: unknown[] };
+            return { errors: data.errors?.length ?? (response.ok ? 0 : 1), skipped: data.skipped?.length ?? 0, updated: Boolean(data.updated?.length) };
+          } catch { return { errors: 1, skipped: 0, updated: false }; }
         }));
-        errors += counts.reduce((sum, value) => sum + value, 0); setProgress({ done: index + 1, total: unique.length });
-        try { await publishToLark([id]); } catch { errors += 1; }
-        await loadProducts();
+        errors += counts.reduce((sum, value) => sum + value.errors, 0);
+        skippedCountries += counts.reduce((sum, value) => sum + value.skipped, 0);
+        setProgress({ done: index + 1, total: unique.length });
+        if (counts.some((value) => value.updated)) {
+          updatedProducts += 1;
+          if (!costsSynced) {
+            costsSynced = true;
+            try { await fetch('/api/lark/sync', { method: 'POST' }); } catch { /* Keep price results when Lark is unavailable. */ }
+          }
+          try { await publishToLark([id]); } catch { errors += 1; }
+        }
+        if (counts.some((value) => value.updated || value.errors)) await loadProducts();
       }
-      if (!quiet) setNotice(errors ? `Refresh finished. ${errors} country matches need review.` : `Updated ${unique.length} products.`);
+      if (!quiet) setNotice(`Updated ${updatedProducts} products.${skippedCountries ? ` Skipped ${skippedCountries} country prices refreshed within 12 hours.` : ''}${errors ? ` ${errors} updates need review.` : ''}`);
     } finally { refreshingRef.current = false; setRefreshing(false); }
   }, [loadProducts]);
   async function saveExpected(group: Group, country: Country) {

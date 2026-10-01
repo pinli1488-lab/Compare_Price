@@ -2,11 +2,18 @@ import { emptyCountryPrice, ensureSchema, getD1, getProduct, mapCountryPrice, re
 import { COUNTRIES, COUNTRY_CODES, type CountryCode } from '@/lib/countries';
 import { fetchMiStoreProduct, searchMiStore } from '@/lib/mistore';
 import { fetchOffers, findMarketMatch, isPlausibleProductMatch } from '@/lib/prisjakt';
+import { recentSuccessfulRefresh } from '@/lib/refresh-policy';
+import { databaseErrorResponse } from '@/lib/database-error';
 
 export const runtime = 'edge';
 
 async function refreshCountry(product: NonNullable<Awaited<ReturnType<typeof getProduct>>>, country: CountryCode, source: 'manual' | 'auto') {
-  const raw = await getD1().prepare('SELECT * FROM product_country_prices WHERE product_id=? AND country=?').bind(product.id, country).first();
+  const raw = await getD1().prepare(`SELECT p.*, l.manual_at, l.auto_at, s.last_success_at
+    FROM product_country_prices p LEFT JOIN price_refresh_log l ON l.product_id=p.product_id AND l.country=p.country
+    LEFT JOIN price_refresh_success s ON s.product_id=p.product_id AND s.country=p.country
+    WHERE p.product_id=? AND p.country=?`).bind(product.id, country).first();
+  const recent = recentSuccessfulRefresh(raw as Record<string, unknown> | null);
+  if (recent) return { status: 'skipped' as const, ...recent };
   const current = raw ? mapCountryPrice(raw as Record<string, unknown>) : emptyCountryPrice(country);
 
   const namedProduct = /[a-z]{3}/i.test(product.productName) && product.productName.toLowerCase() !== product.sku.toLowerCase();
@@ -58,7 +65,7 @@ async function refreshCountry(product: NonNullable<Awaited<ReturnType<typeof get
       secondLowMerchant: secondLow?.merchant ?? null, updatedAt: refreshedAt,
     });
     await recordRefresh(product.id, country, source, refreshedAt);
-    return;
+    return { status: 'updated' as const };
   }
   await saveVariants(product.id, country, mistore.variants);
   const oldMarketValid = current.matchStatus === 'confirmed' || Boolean(current.marketProductName && isPlausibleProductMatch(mistore.name, current.marketProductName));
@@ -102,23 +109,33 @@ async function refreshCountry(product: NonNullable<Awaited<ReturnType<typeof get
     secondLowMerchant: secondLow?.merchant ?? null,
   });
   await recordRefresh(product.id, country, source, refreshedAt);
+  await getD1().prepare(`INSERT INTO price_refresh_success(product_id,country,last_success_at) VALUES(?,?,?)
+    ON CONFLICT(product_id,country) DO UPDATE SET last_success_at=excluded.last_success_at`).bind(product.id, country, refreshedAt).run();
+  return { status: 'updated' as const };
 }
 
 export async function POST(request: Request) {
+  try { return await refreshRequest(request); }
+  catch (error) { return databaseErrorResponse(error); }
+}
+
+async function refreshRequest(request: Request) {
   await ensureSchema();
   const { ids, country, source } = await request.json() as { ids?: string[]; country?: CountryCode; source?: 'manual' | 'auto' };
   const safeIds = [...new Set(ids ?? [])].slice(0, 1);
   const countries = country && COUNTRY_CODES.includes(country) ? [country] : ['SE' as CountryCode];
   if (!safeIds.length) return Response.json({ updated: [], errors: [] });
   const updated: string[] = []; const errors: Array<{ id: string; country: string; message: string }> = [];
+  const skipped: Array<{ id: string; country: string; refreshedAt: string; nextRefreshAt: string }> = [];
   for (const id of safeIds) {
     const product = await getProduct(id);
     if (!product) { errors.push({ id, country: '', message: 'Product not found' }); continue; }
     const results = await Promise.allSettled(countries.map((code) => refreshCountry(product, code, source === 'auto' ? 'auto' : 'manual')));
     results.forEach((result, index) => {
       if (result.status === 'rejected') errors.push({ id, country: countries[index], message: result.reason instanceof Error ? result.reason.message : 'Refresh failed' });
+      else if (result.value.status === 'skipped') skipped.push({ id, country: countries[index], refreshedAt: result.value.refreshedAt, nextRefreshAt: result.value.nextRefreshAt });
     });
-    if (results.some((result) => result.status === 'fulfilled')) updated.push(id);
+    if (results.some((result) => result.status === 'fulfilled' && result.value.status === 'updated')) updated.push(id);
   }
-  return Response.json({ updated, errors });
+  return Response.json({ updated, errors, skipped });
 }

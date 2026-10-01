@@ -64,6 +64,10 @@ export async function ensureSchema() {
       product_id TEXT NOT NULL, country TEXT NOT NULL, manual_at TEXT, auto_at TEXT,
       PRIMARY KEY (product_id, country)
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS price_refresh_success (
+      product_id TEXT NOT NULL, country TEXT NOT NULL, last_success_at TEXT NOT NULL,
+      PRIMARY KEY (product_id, country)
+    )`),
     db.prepare(`CREATE TABLE IF NOT EXISTS selected_collections (
       handle TEXT PRIMARY KEY, title TEXT NOT NULL, product_handles_json TEXT NOT NULL,
       updated_at TEXT NOT NULL
