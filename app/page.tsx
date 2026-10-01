@@ -233,6 +233,8 @@ export default function Home() {
       if (!collection || !group.members.some((member) => member.markets.SE.mistoreHandle && collection.productHandles.includes(member.markets.SE.mistoreHandle))) return false;
     }
     const markets = (filterCountry === 'ALL' ? COUNTRIES : [filterCountry]).flatMap((country) => group.members.map((member) => member.markets[country]));
+    if (filter === 'missing-market') return (filterCountry === 'ALL' ? COUNTRIES : [filterCountry])
+      .some((country) => group.primary.markets[country].lowPriceMinor == null);
     if (filter === 'above') return markets.some((market) => market.mistorePriceMinor != null && market.lowPriceMinor != null && market.mistorePriceMinor > market.lowPriceMinor);
     if (filter === 'pending') return markets.some((market) => market.mistorePriceMinor == null || market.lowPriceMinor == null || market.matchStatus === 'pending');
     return true;
@@ -574,7 +576,7 @@ export default function Home() {
     </div></header>
     <section className="toolbar">
       <label className="search-box"><input value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder="Search SKU, product name or EAN" /></label>
-      <select aria-label="Price status" value={filter} onChange={(event) => { setFilter(event.target.value); setPage(1); }}><option value="all">All prices</option><option value="above">Above market</option><option value="pending">Needs review</option></select>
+      <select aria-label="Price status" value={filter} onChange={(event) => { setFilter(event.target.value); setPage(1); }}><option value="all">All prices</option><option value="above">Above market</option><option value="missing-market">Missing market price</option><option value="pending">Needs review</option></select>
       <select aria-label="Country filter" value={filterCountry} onChange={(event) => { setFilterCountry(event.target.value as Country | 'ALL'); setPage(1); }}><option value="ALL">All countries</option>{COUNTRIES.map((country) => <option key={country}>{country}</option>)}</select>
       <select aria-label="Collection filter" value={collectionFilter} onChange={(event) => { setCollectionFilter(event.target.value); setPage(1); }}><option value="ALL">All collections</option>{collections.map((collection) => <option key={collection.handle} value={collection.handle}>{collection.title}</option>)}</select>
       <button className="button" disabled={refreshing || !selected.size} onClick={() => void refreshIds([...selected])}>{refreshing ? `Refreshing ${progress.done}/${progress.total}` : `Refresh selected (${selectedGroups.length})`}</button>
