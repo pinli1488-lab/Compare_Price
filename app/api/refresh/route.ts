@@ -11,9 +11,10 @@ async function refreshCountry(product: NonNullable<Awaited<ReturnType<typeof get
 
   const namedProduct = /[a-z]{3}/i.test(product.productName) && product.productName.toLowerCase() !== product.sku.toLowerCase();
   const validCandidate = (name: string, sku: string, ean: string) => {
-    const exact = Boolean((product.sku && product.sku.toLowerCase() === sku.toLowerCase()) || (product.ean && product.ean === ean));
+    const exactSku = Boolean(product.sku && product.sku.toLowerCase() === sku.toLowerCase());
+    const exact = exactSku || Boolean(product.ean && product.ean === ean);
     const newProduct = !/(?:class\s*[a-d]|refurbished|renewed|begagnad|brugt|k[äa]ytetty|renoverad)/i.test(name);
-    return newProduct && (exact || (namedProduct && isPlausibleProductMatch(product.productName, name)));
+    return newProduct && (exactSku || (namedProduct ? isPlausibleProductMatch(product.productName, name) : exact));
   };
   let mistore = current.mistoreHandle
     ? await fetchMiStoreProduct(current.mistoreHandle, country, product.sku, product.ean).catch(() => null)
