@@ -505,8 +505,17 @@ export default function Home() {
     let imported = 0; let updated = 0; let larkErrors = 0; const touchedIds: string[] = [];
     try {
       for (let index = 0; index < items.length; index += 8) {
-        const response = await fetch('/api/products', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ products: items.slice(index, index + 8) }) });
-        const data = await response.json() as ApiPayload; if (!response.ok) throw new Error(data.error || 'Import failed');
+        const batch = items.slice(index, index + 8);
+        const init = { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ products: batch }) };
+        let data: ApiPayload;
+        // Only identifier-based imports can safely update the same records on retry.
+        if (batch.every((item) => item.sku || item.ean)) {
+          data = await requestJson<ApiPayload>('/api/products', init, `Import rows ${index + 1}–${Math.min(index + 8, items.length)}`);
+        } else {
+          const response = await fetch('/api/products', init);
+          data = await response.json() as ApiPayload;
+          if (!response.ok) throw new Error(data.error || 'Import failed');
+        }
         imported += data.imported ?? 0; updated += data.updated ?? 0; touchedIds.push(...(data.touchedIds ?? []));
         if (data.larkError) larkErrors += 1;
       }
