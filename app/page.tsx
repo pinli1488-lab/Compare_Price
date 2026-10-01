@@ -126,7 +126,7 @@ function expectedProfit(record: LarkCost, country: Country, expectedPriceMinor: 
 function groupCostRange(group: Group, country: Country) {
   const all = [...productCosts(group).values()];
   const valid = all.filter((record) => record.status === 'ok' && record.costSekMinor != null);
-  if (!valid.length) return { label: '—', note: all.some((record) => record.status === 'duplicate') ? 'Duplicate SKU in Lark' : 'Missing cost' };
+  if (!valid.length) return { label: '—', note: all.some((record) => record.status === 'duplicate') ? 'Conflicting costs in Lark' : 'Missing cost' };
   const values = valid.map((record) => convertedCost(record.costSekMinor!, country));
   const low = Math.min(...values); const high = Math.max(...values);
   return { label: low === high ? money(low, country) : `${money(low, country)} – ${money(high, country)}`, note: valid.length === all.length ? 'Purchase cost' : `${valid.length}/${all.length} SKUs` };
@@ -390,7 +390,7 @@ export default function Home() {
         setLarkProgress({ done: job.done, total: job.ids.length });
       }
       larkCheckpoint.current = null;
-      const message = `Synced ${job.costRows} Lark cost rows and published ${job.published} SKU rows${job.duplicateRows ? `; ${job.duplicateRows} duplicate SKU rows need review` : ''}.`;
+      const message = `Synced ${job.costRows} Lark cost rows and published ${job.published} SKU rows${job.duplicateRows ? `; ${job.duplicateRows} conflicting cost rows need review` : ''}.`;
       try { await loadProducts(); setNotice(message); }
       catch { setNotice(`${message} Dashboard reload failed; refresh the page when your connection recovers.`); }
     } catch (error) {
@@ -666,7 +666,7 @@ export default function Home() {
     </tbody></table></section>
     {activeVariants && createPortal(<div className="variant-popover-floating" role="tooltip" style={{ left: activeVariants.left, top: activeVariants.top, width: activeVariants.width }} onPointerEnter={cancelVariantClose} onPointerLeave={scheduleVariantClose}>{activeVariants.variants.map((variant, index) => {
       const cost = activeVariants.costs[variant.sku.trim().toLowerCase()];
-      return <div key={`${variant.sku}|${variant.ean}|${index}`}><strong>{variant.title || `Variant ${index + 1}`}</strong><span>SKU {variant.sku || '—'} · EAN {variant.ean || '—'}</span><span>{cost?.status === 'ok' && cost.costSekMinor != null ? `Cost ${money(cost.costSekMinor, 'SE')}` : cost?.status === 'duplicate' ? 'Duplicate SKU in Lark' : 'Cost missing in Lark'}</span><span>{COUNTRIES.map((country) => { const result = cost ? expectedProfit(cost, country, activeVariants.markets[country].expectedPriceMinor) : null; return `${country} ${result ? `${money(result.profitMinor, 'SE')} / ${Math.round(result.margin)}%` : '—'}`; }).join(' · ')}</span></div>;
+      return <div key={`${variant.sku}|${variant.ean}|${index}`}><strong>{variant.title || `Variant ${index + 1}`}</strong><span>SKU {variant.sku || '—'} · EAN {variant.ean || '—'}</span><span>{cost?.status === 'ok' && cost.costSekMinor != null ? `Cost ${money(cost.costSekMinor, 'SE')}` : cost?.status === 'duplicate' ? 'Conflicting costs in Lark' : 'Cost missing in Lark'}</span><span>{COUNTRIES.map((country) => { const result = cost ? expectedProfit(cost, country, activeVariants.markets[country].expectedPriceMinor) : null; return `${country} ${result ? `${money(result.profitMinor, 'SE')} / ${Math.round(result.margin)}%` : '—'}`; }).join(' · ')}</span></div>;
     })}</div>, document.body)}
     {collectionJob && <aside className={`sync-progress ${collectionJobHidden ? 'collapsed' : ''}`} aria-live="polite">{collectionJobHidden
       ? <button className="sync-show" onClick={() => setCollectionJobHidden(false)}>{collectionJob.phase === 'complete' ? 'Collection sync finished' : `Syncing ${collectionJob.title}`} · Show</button>

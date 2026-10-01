@@ -1,5 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { COUNTRIES, COUNTRY_CODES, type CountryCode } from '@/lib/countries';
+import { larkCostRowsAgree } from '@/lib/lark-costs';
 
 export type MatchStatus = 'pending' | 'auto' | 'confirmed' | 'not_found';
 export type CountryPriceRecord = {
@@ -164,7 +165,7 @@ export function mapProducts(productRows: Record<string, unknown>[], countryRows:
     const rows = costGroups.get(normalized) ?? []; if (!rows.length) return [];
     const row = rows[0]; const minor = (name: string) => row[name] == null ? null : Number(row[name]);
     return [[normalized, {
-      sku, recordId: String(row.record_id), status: rows.length > 1 ? 'duplicate' : 'ok', costSekMinor: minor('cost_sek_minor'),
+      sku, recordId: String(row.record_id), status: rows.length > 1 && !larkCostRowsAgree(rows) ? 'duplicate' : 'ok', costSekMinor: minor('cost_sek_minor'),
       warehouseSekMinor: minor('warehouse_sek_minor'), seLogisticsSekMinor: minor('se_logistics_sek_minor'),
       dkLogisticsSekMinor: minor('dk_logistics_sek_minor'), fiLogisticsSekMinor: minor('fi_logistics_sek_minor'),
       noLogisticsSekMinor: minor('no_logistics_sek_minor'), chemicalTaxSeSekMinor: minor('chemical_tax_se_sek_minor'),

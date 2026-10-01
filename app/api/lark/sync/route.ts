@@ -1,5 +1,6 @@
 import { ensureSchema, getD1 } from '@/db/store';
 import { isLarkConfigured, LARK_FIELDS, larkNumber, larkText, listPriceDeskRecords } from '@/lib/lark';
+import { equalCostValues } from '@/lib/lark-costs';
 
 export const runtime = 'edge';
 
@@ -49,10 +50,17 @@ export async function POST() {
         .bind(row.recordId, row.sku, row.normalized, ...row.values, now)));
     }
     await getD1().prepare('DELETE FROM lark_product_costs WHERE updated_at <> ?').bind(now).run();
-    const duplicates = rows.length - new Set(rows.map((row) => row.normalized)).size;
+    const groups = new Map<string, typeof rows>();
+    for (const row of rows) groups.set(row.normalized, [...(groups.get(row.normalized) ?? []), row]);
+    let duplicates = 0; let ignoredDuplicates = 0;
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      if (equalCostValues(group.map((row) => row.values))) ignoredDuplicates += group.length - 1;
+      else duplicates += group.length - 1;
+    }
     await getD1().prepare(`INSERT INTO integration_status(integration,last_synced_at,last_error) VALUES('lark',?,NULL)
       ON CONFLICT(integration) DO UPDATE SET last_synced_at=excluded.last_synced_at,last_error=NULL`).bind(now).run();
-    return Response.json({ synced: rows.length, skipped: records.length - rows.length, duplicateRows: duplicates, lastSyncedAt: now });
+    return Response.json({ synced: rows.length, skipped: records.length - rows.length, duplicateRows: duplicates, ignoredDuplicateRows: ignoredDuplicates, lastSyncedAt: now });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await getD1().prepare(`INSERT INTO integration_status(integration,last_error) VALUES('lark',?)

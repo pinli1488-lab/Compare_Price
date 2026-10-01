@@ -10,7 +10,7 @@ export const runtime = 'edge';
 
 export async function GET(request: Request) {
   const cache = (caches as CacheStorage & { default: Cache }).default;
-  const key = new Request(new URL('/api/products?dashboard-cache=v1', request.url));
+  const key = new Request(new URL('/api/products?dashboard-cache=v2', request.url));
   if (new URL(request.url).searchParams.get('fresh') !== '1' && cache) {
     const cached = await cache.match(key);
     if (cached) return cached;
