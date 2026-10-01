@@ -14,7 +14,9 @@ const SPEC_LABELS = new Set(['ram', 'rom', 'storage', 'memory', 'dual', 'sim', '
 const VARIANT_MARKERS = new Set(['pro', 'plus', 'ultra', 'max', 'lite', 'mini']);
 function meaningfulTokens(value: string) { return new Set([...tokens(value)].filter((token) => !SPEC_LABELS.has(token))); }
 function cleanReferenceTitle(value: string) {
-  return value.replace(/\b(?:Räckvidd|Rækkevidde|Rekkevidde|Toimintasäde|Range|Kantama)\s*:\s*\d+(?:[.,]\d+)?\s*km\b.*$/i, '')
+  return value.replace(/\b(RAM|ROM|STORAGE|MEMORY)\s*\+\s*(?=\d)/gi, '$1 ')
+    .replace(/(\d+\s*(?:GB|TB))\s*\+\s*(?=\d)/gi, '$1 ')
+    .replace(/\b(?:Räckvidd|Rækkevidde|Rekkevidde|Toimintasäde|Range|Kantama)\s*:\s*\d+(?:[.,]\d+)?\s*km\b.*$/i, '')
     .replace(/\b(?:Multiple color options available|Fås i flere farver)\b/gi, '')
     .replace(/\s+-\s+Default Title\s*$/i, '').replace(/\s+/g, ' ').trim();
 }

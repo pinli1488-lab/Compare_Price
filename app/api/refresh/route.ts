@@ -13,7 +13,7 @@ async function refreshCountry(product: NonNullable<Awaited<ReturnType<typeof get
   const validCandidate = (name: string, sku: string, ean: string) => {
     const exact = Boolean((product.sku && product.sku.toLowerCase() === sku.toLowerCase()) || (product.ean && product.ean === ean));
     const newProduct = !/(?:class\s*[a-d]|refurbished|renewed|begagnad|brugt|k[äa]ytetty|renoverad)/i.test(name);
-    return newProduct && (namedProduct ? isPlausibleProductMatch(product.productName, name) : exact);
+    return newProduct && (exact || (namedProduct && isPlausibleProductMatch(product.productName, name)));
   };
   let mistore = current.mistoreHandle
     ? await fetchMiStoreProduct(current.mistoreHandle, country, product.sku, product.ean).catch(() => null)
@@ -32,7 +32,32 @@ async function refreshCountry(product: NonNullable<Awaited<ReturnType<typeof get
       marketProductUrl: marketStillValid ? current.marketProductUrl : null,
       lowPriceMinor: null, lowMerchant: null, lowUrl: null, secondLowPriceMinor: null, secondLowMerchant: null, matchStatus: 'pending' });
     await recordRefresh(product.id, country, source, new Date().toISOString());
-    throw new Error(`${country}: No reliable MiStore match. Select a product manually.`);
+    const identity = await getD1().prepare(`SELECT mistore_name FROM product_country_prices
+      WHERE product_id=? AND mistore_name IS NOT NULL AND mistore_name<>''
+      ORDER BY CASE WHEN country='SE' THEN 0 ELSE 1 END LIMIT 1`).bind(product.id).first();
+    const referenceName = identity?.mistore_name ? String(identity.mistore_name) : namedProduct ? product.productName : '';
+    if (!referenceName) throw new Error(`${country}: No reliable MiStore match. Select a product manually.`);
+    const selected = marketStillValid && current.marketProductId ? {
+      id: current.marketProductId, name: current.marketProductName || referenceName,
+      url: current.marketProductUrl || `${COUNTRIES[country].marketOrigin}/produkt.php?p=${current.marketProductId}`,
+      confidence: current.matchConfidence ?? 100,
+    } : await findMarketMatch({ name: referenceName, ean: product.ean, sku: product.sku }, country);
+    if (!selected) throw new Error(`${country}: No reliable Prisjakt match. Search by name, EAN, or product URL manually.`);
+    const offers = await fetchOffers(selected.id, country);
+    const low = offers[0];
+    if (!low) throw new Error(`${country}: No eligible new offer is available.`);
+    const secondLow = offers.find((offer) => offer.merchant.trim().toLowerCase() !== low.merchant.trim().toLowerCase());
+    const refreshedAt = new Date().toISOString();
+    await upsertCountryPrice(product.id, {
+      ...current, mistoreHandle: null, mistoreName: null, mistoreUrl: null, mistorePriceMinor: null,
+      marketProductId: selected.id, marketProductName: selected.name, marketProductUrl: selected.url,
+      matchConfidence: selected.confidence, matchStatus: marketStillValid ? 'confirmed' : 'auto',
+      lowPriceMinor: Math.round(low.price * 100), lowMerchant: low.merchant, lowUrl: low.url,
+      secondLowPriceMinor: secondLow ? Math.round(secondLow.price * 100) : null,
+      secondLowMerchant: secondLow?.merchant ?? null, updatedAt: refreshedAt,
+    });
+    await recordRefresh(product.id, country, source, refreshedAt);
+    return;
   }
   await saveVariants(product.id, country, mistore.variants);
   const oldMarketValid = current.matchStatus === 'confirmed' || Boolean(current.marketProductName && isPlausibleProductMatch(mistore.name, current.marketProductName));
