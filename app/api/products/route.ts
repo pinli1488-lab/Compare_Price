@@ -53,7 +53,7 @@ export async function POST(request: Request) {
     if (item.ean) byEan.set(item.ean.toLowerCase(), id);
     return getD1().prepare(`INSERT INTO products
     (id,sku,product_name,ean,own_price_ore,currency,match_status,created_at) VALUES (?,?,?,?,0,'SEK','pending',?)`)
-    .bind(id, item.sku, item.productName || item.sku || item.ean, item.ean, now);
+    .bind(id, item.sku, item.productName, item.ean, now);
   });
   for (let index = 0; index < statements.length; index += 80) await getD1().batch(statements.slice(index, index + 80));
   const uniqueTouchedIds = [...new Set(touchedIds)];

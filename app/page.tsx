@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import readXlsxFile from 'read-excel-file';
 import { requestJson } from '@/lib/client-request';
+import { productDisplayName } from '@/lib/product-name';
 
 const COUNTRIES = ['SE', 'DK', 'FI', 'NO'] as const;
 type Country = typeof COUNTRIES[number];
@@ -539,7 +540,7 @@ export default function Home() {
   const exportRows = exportGroups.flatMap((group) => {
     const variants = group.variants.length ? group.variants : [{ sku: group.primary.sku, ean: group.primary.ean, title: '', priceMinor: group.primary.markets.SE.mistorePriceMinor ?? 0 }];
     return variants.map((variant, variantIndex) => {
-      const baseName = group.primary.markets.SE.mistoreName || group.primary.productName;
+      const baseName = productDisplayName(group.primary);
       const productName = variant.title && !/^default title$/i.test(variant.title.trim()) ? `${baseName} - ${variant.title}` : baseName;
       const prices = COUNTRIES.flatMap((country) => {
         const market = group.primary.markets[country];
@@ -589,7 +590,7 @@ export default function Home() {
       {loading ? <tr><td colSpan={23} className="state-row">Loading products…</td></tr> : !pageRows.length ? <tr><td colSpan={23} className="state-row">No products match this filter.</td></tr> : pageRows.map((group) => {
         const product = group.primary; const groupIndex = filtered.findIndex((item) => item.key === group.key); const checked = group.members.every((member) => selected.has(member.id));
         return <tr key={group.key}><td className="check"><input type="checkbox" checked={checked} readOnly onClick={(event) => toggleGroup(group, groupIndex, event.shiftKey)} aria-label={`Select product ${numbers.get(group.key)}`}/></td>
-          <td className="product-cell"><strong><span className="row-number">{numbers.get(group.key)}.</span> {product.sku || group.variants[0]?.sku || '—'}</strong><span title={product.markets.SE.mistoreName || product.productName}>{product.markets.SE.mistoreName || product.productName}</span>
+          <td className="product-cell"><strong><span className="row-number">{numbers.get(group.key)}.</span> {product.sku || group.variants[0]?.sku || '—'}</strong><span title={productDisplayName(product)}>{productDisplayName(product)}</span>
             {group.variants.length > 1 ? <button type="button" className="variant-trigger" aria-expanded={activeVariants?.key === group.key} onPointerEnter={(event) => showVariants(event, group)} onPointerLeave={scheduleVariantClose} onFocus={(event) => showVariants(event, group)} onBlur={scheduleVariantClose} onClick={(event) => showVariants(event, group)}>Variants ({group.variants.length})</button> : <small>{product.ean || group.variants[0]?.ean || 'No EAN'}</small>}
           </td>
           {COUNTRIES.flatMap((country) => {

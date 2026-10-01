@@ -1,6 +1,7 @@
 import { COUNTRY_CODES, type CountryCode } from '@/lib/countries';
 import { batchWritePriceDeskRecords, createPriceDeskField, isLarkConfigured, LARK_FIELDS, larkText, listPriceDeskFields, listPriceDeskRecords } from '@/lib/lark';
 import { getD1, mapProducts, type LarkCostRecord, type ProductRecord, type ProductVariant } from '@/db/store';
+import { productDisplayName } from '@/lib/product-name';
 
 type FieldValue = string | number | null;
 type Group = { primary: ProductRecord; members: ProductRecord[] };
@@ -82,9 +83,9 @@ async function loadProducts() {
 function fieldsForVariant(group: Group, variant: Variant, groupIndex: number, variantIndex: number, variantCount: number): Record<string, FieldValue> {
   const fields: Record<string, FieldValue> = {
     'PD Row No': `${groupIndex + 1}${variantCount > 1 ? `.${variantIndex + 1}` : ''}`,
-    'PD Product Name': variant.title && !/^default title$/i.test(variant.title.trim())
-      ? `${group.primary.markets.SE.mistoreName || group.primary.productName} - ${variant.title}`
-      : group.primary.markets.SE.mistoreName || variant.fallbackName,
+    'PD Product Name': variant.title && !/^default title$/i.test(variant.title.trim()) && productDisplayName(group.primary) !== 'Name pending'
+      ? `${productDisplayName(group.primary)} - ${variant.title}`
+      : productDisplayName(group.primary),
     'PD EAN': variant.ean || null,
     'PD Variant': variant.title && !/^default title$/i.test(variant.title.trim()) ? variant.title : null,
   };
