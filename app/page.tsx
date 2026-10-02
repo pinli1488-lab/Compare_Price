@@ -7,6 +7,9 @@ import { requestJson } from '@/lib/client-request';
 import { productDisplayName } from '@/lib/product-name';
 import { INTERNAL_COLLECTIONS, type InternalCollectionId, type CollectionOverride } from '@/lib/internal-collections';
 
+const DASHBOARD_CACHE_KEY = 'pricedesk:dashboard:v1';
+const EXPECTED_DRAFT_KEY = 'pricedesk:expected-drafts:v1';
+
 const COUNTRIES = ['SE', 'DK', 'FI', 'NO'] as const;
 type Country = typeof COUNTRIES[number];
 type Variant = { sku: string; ean: string; title: string; priceMinor: number };
@@ -187,7 +190,9 @@ export default function Home() {
   const [manualQuery, setManualQuery] = useState(''); const [manualCandidates, setManualCandidates] = useState<MiStoreCandidate[]>([]); const [manualLoading, setManualLoading] = useState(false);
   const [matrix, setMatrix] = useState<Matrix>([]); const [hasHeader, setHasHeader] = useState(true);
   const [columns, setColumns] = useState({ sku: -1, name: -1, ean: -1 }); const [pasteText, setPasteText] = useState('');
-  const [expectedDraft, setExpectedDraft] = useState<Record<string, string>>({}); const fileRef = useRef<HTMLInputElement>(null);
+  const [expectedDraft, setExpectedDraft] = useState<Record<string, string>>({});
+  const draftRef = useRef<Record<string, string>>({});
+  const savingExpected = useRef(new Set<string>()); const fileRef = useRef<HTMLInputElement>(null);
   const [activeVariants, setActiveVariants] = useState<ActiveVariants | null>(null);
   const [lark, setLark] = useState<LarkStatus>({ configured: false, lastSyncedAt: null, lastError: null }); const [larkSyncing, setLarkSyncing] = useState(false);
   const [larkProgress, setLarkProgress] = useState({ done: 0, total: 0 });
@@ -199,6 +204,7 @@ export default function Home() {
     try {
       const data = await requestJson<ApiPayload>(fresh ? '/api/products?fresh=1' : '/api/products', { cache: 'no-store' }, 'Load products');
       if (!Array.isArray(data.products)) throw new Error('Load products: invalid product data. Existing rows have been retained.');
+      try { localStorage.setItem(DASHBOARD_CACHE_KEY, JSON.stringify(data)); } catch { /* Preserve the visible data when browser storage is full. */ }
       setProducts(data.products); if (data.lark) setLark(data.lark);
       setLoadError('');
       return data;
@@ -211,7 +217,23 @@ export default function Home() {
     const data = await requestJson<ApiPayload>('/api/collections', { cache: 'no-store' }, 'Load collections');
     setCollections(data.collections ?? []);
   }, []);
-  useEffect(() => { queueMicrotask(() => { void loadProducts(false).catch((error) => setNotice(String(error))).finally(() => setLoading(false)); }); }, [loadProducts]);
+  function updateExpectedDraft(next: Record<string, string>) {
+    draftRef.current = next;
+    setExpectedDraft(next);
+    try { localStorage.setItem(EXPECTED_DRAFT_KEY, JSON.stringify(next)); }
+    catch { setNotice('Browser backup failed. Keep this page open until your prices are saved.'); }
+  }
+  useEffect(() => { queueMicrotask(() => {
+    try {
+      const cached = JSON.parse(localStorage.getItem(DASHBOARD_CACHE_KEY) || 'null') as ApiPayload | null;
+      if (Array.isArray(cached?.products)) { setProducts(cached.products); if (cached.lark) setLark(cached.lark); setLoading(false); }
+      const drafts: unknown = JSON.parse(localStorage.getItem(EXPECTED_DRAFT_KEY) || '{}');
+      if (drafts && typeof drafts === 'object' && !Array.isArray(drafts)) {
+        draftRef.current = Object.fromEntries(Object.entries(drafts).filter(([, value]) => typeof value === 'string'));
+        setExpectedDraft(draftRef.current);
+      }
+    } catch { /* An invalid browser cache must not prevent loading from the server. */ }
+    void loadProducts(false).catch((error) => setNotice(String(error))).finally(() => setLoading(false)); }); }, [loadProducts]);
   useEffect(() => {
     const timer = window.setInterval(() => {
       if (document.visibilityState === 'visible') void loadProducts(false).catch(() => {});
@@ -351,24 +373,37 @@ export default function Home() {
   }, [loadProducts]);
   async function saveExpected(group: Group, country: Country) {
     const product = group.primary;
-    const key = `${product.id}:${country}`; if (!(key in expectedDraft)) return;
-    const input = expectedDraft[key]; const parsed = parsePrice(input);
+    const key = `${product.id}:${country}`; if (!(key in draftRef.current) || savingExpected.current.has(key)) return;
+    const input = draftRef.current[key]; const parsed = parsePrice(input);
     if (input.trim() && (!Number.isFinite(parsed) || parsed < 0)) return setNotice('Enter a valid expected price.');
     const expectedPriceMinor = input.trim() ? Math.round(parsed * 100) : null;
     const skus = product.sku ? [product.sku] : [];
+    savingExpected.current.add(key);
+    try {
     const response = await fetch('/api/products', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: product.id, country, expectedPriceMinor, skus }) });
-    const data = await response.json() as ApiPayload;
-    if (!response.ok) return setNotice(data.error || 'Could not save expected price.');
+    const body = await response.text();
+    let data: ApiPayload;
+    try { data = JSON.parse(body) as ApiPayload; } catch { throw new Error(`Server returned HTTP ${response.status}.`); }
+    if (!response.ok) throw new Error(data.error || 'Could not save expected price.');
     setProducts((current) => current.map((item) => item.id === product.id
       ? { ...item, markets: { ...item.markets, [country]: { ...item.markets[country], expectedPriceMinor } } }
       : item));
-    setExpectedDraft((draft) => { if (draft[key] !== input) return draft; const next = { ...draft }; delete next[key]; return next; });
+    try {
+      const cached = JSON.parse(localStorage.getItem(DASHBOARD_CACHE_KEY) || 'null') as ApiPayload | null;
+      if (cached?.products) {
+        cached.products = cached.products.map((item) => item.id === product.id ? { ...item, markets: { ...item.markets, [country]: { ...item.markets[country], expectedPriceMinor } } } : item);
+        localStorage.setItem(DASHBOARD_CACHE_KEY, JSON.stringify(cached));
+      }
+    } catch { /* Keep drafts backed up if updating the snapshot fails. */ }
+    if (draftRef.current[key] === input) { const next = { ...draftRef.current }; delete next[key]; updateExpectedDraft(next); }
     try { await publishToLark([product.id]); }
     catch { setNotice('Expected price saved, but PriceDesk fields could not sync to Lark. Try Sync Lark.'); return; }
     if (data.larkWriteback === 'saved') setNotice(`Expected price saved to Lark for SKU ${product.sku}.`);
     else if (data.larkWriteback === 'partial') setNotice('Saved locally, but some Lark rows could not be updated.');
     else if (data.larkWriteback === 'no_matching_sku') setNotice('Saved locally. No matching SKU row was found in Lark.');
     else setNotice('Saved locally. Connect Lark to enable writeback.');
+    } catch (error) { setNotice(`Expected price not saved to server: ${error instanceof Error ? error.message : String(error)} Your input is retained in this browser.`); }
+    finally { savingExpected.current.delete(key); }
   }
   async function syncLark() {
     if (larkSyncingRef.current) return;
@@ -600,7 +635,7 @@ export default function Home() {
         const larkCost = productCosts(group).get(variant.sku.trim().toLowerCase());
         return [mistorePrice == null ? '' : mistorePrice / 100, market.lowPriceMinor == null ? '' : market.lowPriceMinor / 100,
           market.secondLowPriceMinor == null ? '' : market.secondLowPriceMinor / 100,
-          market.expectedPriceMinor == null ? '' : market.expectedPriceMinor / 100,
+          `${group.primary.id}:${country}` in expectedDraft ? expectedDraft[`${group.primary.id}:${country}`].trim() ? parsePrice(expectedDraft[`${group.primary.id}:${country}`]) : '' : market.expectedPriceMinor == null ? '' : market.expectedPriceMinor / 100,
           larkCost?.status === 'ok' && larkCost.costSekMinor != null ? convertedCost(larkCost.costSekMinor, country) / 100 : ''];
       });
       const sources = COUNTRIES.flatMap((country) => {
@@ -611,7 +646,12 @@ export default function Home() {
     });
   });
   function exportCsv() {
-    if (!exportGroups.length) return; const csv = [exportHeader, ...exportRows].map((row) => row.map(escapeCsv).join(',')).join('\r\n');
+    if (!exportGroups.length) return;
+    for (const group of exportGroups) for (const country of COUNTRIES) {
+      const value = expectedDraft[`${group.primary.id}:${country}`];
+      if (value?.trim() && (!Number.isFinite(parsePrice(value)) || parsePrice(value) < 0)) { setNotice('Correct invalid expected prices before exporting.'); return; }
+    }
+    const csv = [exportHeader, ...exportRows].map((row) => row.map(escapeCsv).join(',')).join('\r\n');
     const url = URL.createObjectURL(new Blob(['\ufeff', csv], { type: 'text/csv;charset=utf-8' }));
     const anchor = document.createElement('a'); anchor.href = url; anchor.download = `PriceDesk_${new Date().toISOString().slice(0, 10)}.csv`; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
@@ -632,6 +672,7 @@ export default function Home() {
       {selected.size > 0 && <button className="delete-button" onClick={deleteSelected}>Delete selected</button>}
       <div className="toolbar-meta"><span>Lark: {loadError && !products.length ? 'Status unavailable' : lark.configured ? dateLabel(lark.lastSyncedAt) : 'Not connected'}</span><span>Manual (Stockholm): {dateLabel(lastManual)}</span><span title="Variants of the same MiStore product share one table row">Automatic (Beijing): {dateLabel(lastAuto, 'Asia/Shanghai')} · {autoCompletedGroups}/{groups.length} product rows · {checkedTodayIds.size}/{products.length} records checked today</span></div>
       <div className="pager"><span>{filtered.length ? `${(safePage - 1) * 50 + 1}–${Math.min(safePage * 50, filtered.length)}` : '0'} / {filtered.length}</span><button disabled={safePage <= 1} onClick={() => setPage(safePage - 1)} aria-label="Previous page">‹</button><span>{safePage} / {pageCount}</span><button disabled={safePage >= pageCount} onClick={() => setPage(safePage + 1)} aria-label="Next page">›</button></div>
+      {!!Object.keys(expectedDraft).length && <div className="load-error" role="status"><span>{Object.keys(expectedDraft).length} expected prices pending server save. Retained in this browser.</span><button className="button" onClick={() => { void (async () => { for (const group of groups) for (const country of COUNTRIES) await saveExpected(group, country); })(); }}>Retry saving prices</button></div>}
       {loadError && <div className="load-error" role="alert"><span>{loadError}{!!products.length && ' Showing previously loaded products.'}</span><button className="button" disabled={loading} onClick={() => { setLoading(true); void loadProducts(false).catch(() => {}).finally(() => setLoading(false)); }}>Retry loading</button></div>}
     </section>
     <section className="grid-wrap" onScrollCapture={() => setActiveVariants(null)}><table className="price-grid"><colgroup><col style={{ width: 36 }}/><col style={{ width: 235 }}/>{COUNTRIES.flatMap((country) => [<col key={`${country}-own`} style={{ width: 145 }}/>, <col key={`${country}-market`} style={{ width: 145 }}/>, <col key={`${country}-second`} style={{ width: 145 }}/>, <col key={`${country}-expected`} style={{ width: 145 }}/>, <col key={`${country}-cost`} style={{ width: 145 }}/>])}<col style={{ width: 126 }}/></colgroup><thead><tr>
@@ -658,7 +699,7 @@ export default function Home() {
               <td key={`${country}-second`} className="price-cell" title={tooltip}>{market.secondLowPriceMinor != null && market.marketProductUrl
                 ? <a className="price-link" href={market.marketProductUrl} target="_blank" rel="noreferrer">{money(market.secondLowPriceMinor, country)}</a>
                 : <span className="price-link">—</span>}<small className="merchant" title={market.secondLowMerchant ?? ''}>{market.secondLowMerchant || 'Not available'}</small></td>,
-              <td key={`${country}-expected`} className="price-cell expected-cell"><input aria-label={`${country} Expected Price for product ${numbers.get(group.key)}`} value={key in expectedDraft ? expectedDraft[key] : market.expectedPriceMinor == null ? '' : String(market.expectedPriceMinor / 100)} onChange={(event) => setExpectedDraft((draft) => ({ ...draft, [key]: event.target.value }))} onBlur={() => void saveExpected(group, country)} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }} placeholder="—"/><small className={expectedDiff ? expectedDiff.percentage > 0 ? 'bad' : 'good' : 'neutral'}>{expectedDiff?.label ?? '—'}</small><small className={profit?.startsWith('-') ? 'bad profit-line' : profit ? 'good profit-line' : 'neutral profit-line'}>{profit ?? 'Profit unavailable'}</small></td>,
+              <td key={`${country}-expected`} className="price-cell expected-cell"><input aria-label={`${country} Expected Price for product ${numbers.get(group.key)}`} value={key in expectedDraft ? expectedDraft[key] : market.expectedPriceMinor == null ? '' : String(market.expectedPriceMinor / 100)} onChange={(event) => updateExpectedDraft({ ...draftRef.current, [key]: event.target.value })} onBlur={() => void saveExpected(group, country)} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }} placeholder="—"/>{key in expectedDraft && <small className="neutral">Pending save · browser backup</small>}<small className={expectedDiff ? expectedDiff.percentage > 0 ? 'bad' : 'good' : 'neutral'}>{expectedDiff?.label ?? '—'}</small><small className={profit?.startsWith('-') ? 'bad profit-line' : profit ? 'good profit-line' : 'neutral profit-line'}>{profit ?? 'Profit unavailable'}</small></td>,
               <td key={`${country}-cost`} className="price-cell"><span className="price-link no-link">{cost.label}</span><small className="neutral">{cost.note}</small></td>];
           })}<td className="action-cell"><button className="match-button" onClick={() => openMatch(product)}>Match / Edit</button></td>
         </tr>;

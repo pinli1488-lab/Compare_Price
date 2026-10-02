@@ -98,6 +98,7 @@ export async function POST(request: Request) {
 }
 
 export async function PATCH(request: Request) {
+  try {
   await ensureSchema();
   const body = await request.json() as { id?: string; country?: string; expectedPriceMinor?: number | null; skus?: string[] };
   if (!body.id || !isCountryCode(body.country)) return Response.json({ error: 'Invalid product or country' }, { status: 400 });
@@ -124,6 +125,7 @@ export async function PATCH(request: Request) {
     .bind(body.id, body.country, body.country === 'FI' ? 'EUR' : body.country === 'DK' ? 'DKK' : body.country === 'NO' ? 'NOK' : 'SEK', value).run();
   await getD1().prepare('DELETE FROM lark_publish_log WHERE product_id=?').bind(body.id).run();
   return Response.json({ saved: true, larkWriteback, larkWritebackCount, writebackErrors });
+  } catch (error) { return databaseErrorResponse(error); }
 }
 
 export async function DELETE(request: Request) {
