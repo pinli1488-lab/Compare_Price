@@ -12,8 +12,11 @@ export async function GET(request: Request) {
   const cache = (caches as CacheStorage & { default: Cache }).default;
   const key = new Request(new URL('/api/products?dashboard-cache=v2', request.url));
   if (new URL(request.url).searchParams.get('fresh') !== '1' && cache) {
-    const cached = await cache.match(key);
-    if (cached) return cached;
+    try {
+      const cached = await cache.match(key);
+      // Cache API responses have immutable headers; the framework adds headers.
+      if (cached) return new Response(cached.body, { status: cached.status, headers: new Headers(cached.headers) });
+    } catch { /* Fall back to the database when the edge cache is unavailable. */ }
   }
   try {
     const response = await readProducts();
