@@ -1,5 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { COUNTRIES, COUNTRY_CODES, type CountryCode } from '@/lib/countries';
+import { shouldExcludeMerchant, type MarketOffer } from '@/lib/prisjakt';
 import { larkCostRowsAgree } from '@/lib/lark-costs';
 
 export type MatchStatus = 'pending' | 'auto' | 'confirmed' | 'not_found';
@@ -10,6 +11,7 @@ export type CountryPriceRecord = {
   matchConfidence: number | null; matchStatus: MatchStatus;
   lowPriceMinor: number | null; lowMerchant: string | null; lowUrl: string | null;
   secondLowPriceMinor: number | null; secondLowMerchant: string | null;
+  marketOffers?: MarketOffer[]; offersUpdatedAt?: string | null;
   expectedPriceMinor: number | null; updatedAt: string | null; manualRefreshedAt: string | null; autoRefreshedAt: string | null;
 };
 export type ProductVariant = { sku: string; ean: string; title: string; priceMinor: number };
@@ -56,6 +58,13 @@ export async function ensureSchema() {
       second_low_price_minor INTEGER, second_low_merchant TEXT,
       expected_price_minor INTEGER, updated_at TEXT,
       PRIMARY KEY (product_id, country)
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS product_market_offers (
+      product_id TEXT NOT NULL, country TEXT NOT NULL, market_product_id TEXT NOT NULL,
+      offers_json TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(product_id,country)
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS market_lark_target (
+      id INTEGER PRIMARY KEY CHECK(id=1), base_token TEXT NOT NULL, table_id TEXT NOT NULL
     )`),
     db.prepare(`CREATE TABLE IF NOT EXISTS product_variants (
       product_id TEXT NOT NULL, country TEXT NOT NULL, variants_json TEXT NOT NULL,
@@ -131,6 +140,8 @@ export function mapCountryPrice(row: Record<string, unknown>): CountryPriceRecor
     secondLowPriceMinor: row.second_low_price_minor == null ? null : Number(row.second_low_price_minor),
     secondLowMerchant: row.second_low_merchant ? String(row.second_low_merchant) : null,
     expectedPriceMinor: row.expected_price_minor == null ? null : Number(row.expected_price_minor),
+    marketOffers: row.offers_market_product_id === row.market_product_id && row.offers_json ? (JSON.parse(String(row.offers_json)) as MarketOffer[]).filter(offer => !shouldExcludeMerchant(offer.merchant)) : [],
+    offersUpdatedAt: row.offers_market_product_id === row.market_product_id && row.offers_updated_at ? String(row.offers_updated_at) : null,
     updatedAt: row.updated_at ? String(row.updated_at) : null,
     manualRefreshedAt: row.manual_at ? String(row.manual_at) : null,
     autoRefreshedAt: row.auto_at ? String(row.auto_at) : null,

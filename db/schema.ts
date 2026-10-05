@@ -66,3 +66,12 @@ export const larkProductCosts = sqliteTable('lark_product_costs', {
 export const integrationStatus = sqliteTable('integration_status', {
   integration: text('integration').primaryKey(), lastSyncedAt: text('last_synced_at'), lastError: text('last_error'),
 });
+
+export const productMarketOffers = sqliteTable('product_market_offers', {
+  productId: text('product_id').notNull(), country: text('country').notNull(), marketProductId: text('market_product_id').notNull(),
+  offersJson: text('offers_json').notNull(), updatedAt: text('updated_at').notNull(),
+}, table => [primaryKey({ columns: [table.productId, table.country] })]);
+
+export const marketLarkTarget = sqliteTable('market_lark_target', {
+  id: integer('id').primaryKey(), baseToken: text('base_token').notNull(), tableId: text('table_id').notNull(),
+});

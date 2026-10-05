@@ -1,3 +1,4 @@
+import { saveMarketOffers } from '@/lib/market-offers';
 import { emptyCountryPrice, ensureSchema, getD1, getProduct, mapCountryPrice, recordRefresh, saveVariants, upsertCountryPrice } from '@/db/store';
 import { COUNTRIES, COUNTRY_CODES, type CountryCode } from '@/lib/countries';
 import { fetchMiStoreProduct, searchMiStore } from '@/lib/mistore';
@@ -52,6 +53,7 @@ async function refreshCountry(product: NonNullable<Awaited<ReturnType<typeof get
     } : await findMarketMatch({ name: referenceName, ean: product.ean, sku: product.sku }, country);
     if (!selected) throw new Error(`${country}: No reliable Prisjakt match. Search by name, EAN, or product URL manually.`);
     const offers = await fetchOffers(selected.id, country);
+    if (offers.length) await saveMarketOffers(product.id, country, selected.id, offers);
     const low = offers[0];
     if (!low) throw new Error(`${country}: No eligible new offer is available.`);
     const secondLow = offers.find((offer) => offer.merchant.trim().toLowerCase() !== low.merchant.trim().toLowerCase());
@@ -97,6 +99,7 @@ async function refreshCountry(product: NonNullable<Awaited<ReturnType<typeof get
   } : candidate;
   if (!selected) { await recordRefresh(product.id, country, source, new Date().toISOString()); throw new Error(`${country}: No reliable Prisjakt match. Search by name, EAN, or product URL manually.`); }
   const offers = await fetchOffers(selected.id, country);
+  if (offers.length) await saveMarketOffers(product.id, country, selected.id, offers);
   const low = offers[0];
   if (!low) { await recordRefresh(product.id, country, source, new Date().toISOString()); throw new Error(`${country}: No eligible new offer is available.`); }
   const refreshedAt = new Date().toISOString();

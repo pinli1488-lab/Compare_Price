@@ -22,3 +22,5 @@
 .internal-category-controls{display:flex;align-items:center;flex-wrap:wrap;gap:12px;padding:14px 22px;border-bottom:1px solid var(--line);font-size:12px}.internal-category-controls label{display:flex;align-items:center;gap:10px}.internal-category-controls select{padding:7px 10px;border:1px solid #ddd;border-radius:6px;background:#fff}.internal-category-controls span{color:var(--muted)}.collection-section-heading{margin:20px 22px 0;font-size:14px}
 
 .load-error{display:flex;align-items:center;gap:16px;width:100%;padding:12px;border:1px solid #ddd;background:#fafafa;color:#444;font-size:12px}.load-error span{flex:1}.load-error button{flex-shrink:0}
+
+.offers-trigger{border:0;background:none;padding:4px 0;color:#666;text-decoration:underline;cursor:pointer;font-size:12px;text-align:left}.offers-content{padding:20px 24px}.offers-table{width:100%;min-width:0;border-collapse:collapse;table-layout:auto}.offers-table th,.offers-table td{position:static;padding:12px 10px;border-bottom:1px solid #eee;text-align:left}.offers-table th{background:#f5f5f5}.offers-table a{color:inherit;text-decoration:underline}.offers-modal{width:min(800px,100%)}

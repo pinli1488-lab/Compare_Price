@@ -148,11 +148,11 @@ export async function findMarketMatch(input: { name: string; ean?: string; sku?:
 }
 
 function unescapeJsonString(value: string) { try { return JSON.parse(`"${value}"`) as string; } catch { return value.replace(/\\u0026/g, '&').replace(/\\\//g, '/'); } }
-function shouldExcludeMerchant(name: string) {
+export function shouldExcludeMerchant(name: string) {
   const value = normalize(name).replace(/\s+/g, '');
   return value.includes('refurbed') || value.includes('renewed') || value.includes('reconditioned') ||
     value.includes('rekonditionerad') || value.includes('renoverad') || value.includes('brugt') ||
-    value.includes('kaytetty') || value.includes('mistore');
+    value.includes('kaytetty') || value.includes('mistore') || value.includes('xiaomiofficialstore');
 }
 function isNewCondition(condition: string) {
   const value = normalize(condition);
@@ -176,6 +176,11 @@ export async function fetchOffers(productId: string, country: CountryCode = 'SE'
     if (!price || shouldExcludeMerchant(merchant) || !isNewCondition(condition) || !stock || unescapeJsonString(stock[1]) !== 'InStock') continue;
     offers.push({ merchant, price: Number(price[1]), currency: price[2], url: link ? unescapeJsonString(link[1]) : `${config.marketOrigin}/produkt.php?p=${productId}`, condition, stockStatus: stock ? unescapeJsonString(stock[1]) : '' });
   }
-  const unique = new Map<string, MarketOffer>(); for (const offer of offers) unique.set(`${offer.merchant}|${offer.price}|${offer.url}`, offer);
+  const unique = new Map<string, MarketOffer>();
+  for (const offer of offers) {
+    const key = normalize(offer.merchant); const previous = unique.get(key);
+    if (!Number.isFinite(offer.price) || offer.price <= 0 || offer.currency !== config.currency) continue;
+    if (!previous || offer.price < previous.price) unique.set(key, offer);
+  }
   return [...unique.values()].sort((a, b) => a.price - b.price);
 }

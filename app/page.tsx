@@ -1,4 +1,5 @@
 'use client';
+import type { MarketOffer } from '@/lib/prisjakt';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -24,6 +25,7 @@ type Market = {
   mistorePriceMinor: number | null; marketProductId: string | null; marketProductName: string | null;
   marketProductUrl: string | null; matchStatus: string; lowPriceMinor: number | null; lowMerchant: string | null;
   secondLowPriceMinor: number | null; secondLowMerchant: string | null;
+  marketOffers?: MarketOffer[]; offersUpdatedAt?: string | null;
   expectedPriceMinor: number | null; updatedAt: string | null; manualRefreshedAt: string | null; autoRefreshedAt: string | null;
 };
 type Product = { id: string; sku: string; productName: string; ean: string; createdAt: string; markets: Record<Country, Market>; variants: Record<Country, Variant[]>; larkCosts: Record<string, LarkCost>; internalCategory: InternalCollectionId | null; internalCategoryOverride: CollectionOverride };
@@ -39,7 +41,7 @@ type CollectionJob = { handle: string; title: string; phase: 'importing' | 'pric
   processed: number; imported: number; updated: number; priceProcessed: number; priceTotal: number; failed: number; priceErrors: number; larkErrors: number };
 type ActiveVariants = { key: string; variants: Variant[]; costs: Record<string, LarkCost>; markets: Record<Country, Market>; left: number; top: number; width: number };
 type Matrix = Array<Array<string | number | boolean | Date | null>>;
-type ApiPayload = { error?: string; products?: Product[]; mistoreCandidates?: MiStoreCandidate[]; marketCandidates?: MarketCandidate[];
+type ApiPayload = { error?: string; marketError?: string; marketPublished?: number; products?: Product[]; mistoreCandidates?: MiStoreCandidate[]; marketCandidates?: MarketCandidate[];
   errors?: Array<{ message: string }>; imported?: number; updated?: number; ids?: string[]; touchedIds?: string[]; collections?: Collection[]; collection?: Collection;
   processed?: number; failedHandles?: string[]; lark?: LarkStatus; synced?: number; duplicateRows?: number;
   larkWriteback?: string; larkWritebackCount?: number; writebackErrors?: string[]; fieldsRemaining?: number; published?: number; createdRows?: number;
@@ -174,6 +176,7 @@ function groupProducts(products: Product[]): Group[] {
 export default function Home() {
   const [products, setProducts] = useState<Product[]>([]); const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
+  const [marketSyncError, setMarketSyncError] = useState('');
   const [query, setQuery] = useState(''); const [filter, setFilter] = useState('all'); const [filterCountry, setFilterCountry] = useState<Country | 'ALL'>('ALL');
   const [collections, setCollections] = useState<Collection[]>([]); const [collectionFilter, setCollectionFilter] = useState('ALL');
   const [collectionsOpen, setCollectionsOpen] = useState(false); const [collectionInput, setCollectionInput] = useState(''); const [collectionSaving, setCollectionSaving] = useState(false);
@@ -193,6 +196,7 @@ export default function Home() {
   const [expectedDraft, setExpectedDraft] = useState<Record<string, string>>({});
   const draftRef = useRef<Record<string, string>>({});
   const savingExpected = useRef(new Set<string>()); const fileRef = useRef<HTMLInputElement>(null);
+  const [offersPanel, setOffersPanel] = useState<{ id: string; country: Country; name: string; url: string | null; offers: MarketOffer[]; loading: boolean; error: string; updatedAt: string | null } | null>(null);
   const [activeVariants, setActiveVariants] = useState<ActiveVariants | null>(null);
   const [lark, setLark] = useState<LarkStatus>({ configured: false, lastSyncedAt: null, lastError: null }); const [larkSyncing, setLarkSyncing] = useState(false);
   const [larkProgress, setLarkProgress] = useState({ done: 0, total: 0 });
@@ -244,8 +248,20 @@ export default function Home() {
   }, [loadProducts]);
   useEffect(() => { queueMicrotask(() => { void loadCollections().catch((error) => setNotice(String(error))); }); }, [loadCollections]);
   useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(''), 5000); return () => window.clearTimeout(timer); }, [notice]);
-  useEffect(() => { const dismiss = (event: KeyboardEvent) => { if (event.key === 'Escape') { closeImport(); setMatchProduct(null); setCollectionsOpen(false); setActiveVariants(null); } }; document.addEventListener('keydown', dismiss); return () => document.removeEventListener('keydown', dismiss); }, []);
+  useEffect(() => { const dismiss = (event: KeyboardEvent) => { if (event.key === 'Escape') { closeImport(); setOffersPanel(null); setMatchProduct(null); setCollectionsOpen(false); setActiveVariants(null); } }; document.addEventListener('keydown', dismiss); return () => document.removeEventListener('keydown', dismiss); }, []);
   useEffect(() => () => { if (variantCloseTimer.current) clearTimeout(variantCloseTimer.current); }, []);
+
+  async function showOffers(product: Product, country: Country) {
+    const market = product.markets[country];
+    setOffersPanel({ id: product.id, country, name: productDisplayName(product), url: market.marketProductUrl, offers: market.marketOffers ?? [], updatedAt: market.offersUpdatedAt ?? null, loading: true, error: '' });
+    try {
+      const response = await fetch('/api/offers', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: product.id, country }) });
+      const result = await response.json() as { offers?: MarketOffer[]; updatedAt?: string; error?: string };
+      if (!response.ok || !result.offers) throw new Error(result.error || 'Could not load market offers.');
+      setOffersPanel(current => current?.id === product.id && current.country === country ? { ...current, offers: result.offers!, updatedAt: result.updatedAt ?? null, loading: false } : current);
+      setProducts(current => current.map(item => item.id === product.id ? { ...item, markets: { ...item.markets, [country]: { ...item.markets[country], marketOffers: result.offers, offersUpdatedAt: result.updatedAt, lowPriceMinor: result.offers![0] ? Math.round(result.offers![0].price*100) : item.markets[country].lowPriceMinor, lowMerchant: result.offers![0]?.merchant ?? item.markets[country].lowMerchant, secondLowPriceMinor: result.offers![1] ? Math.round(result.offers![1].price*100) : null, secondLowMerchant: result.offers![1]?.merchant ?? null } } } : item));
+    } catch (error) { setOffersPanel(current => current?.id === product.id && current.country === country ? { ...current, loading: false, error: error instanceof Error ? error.message : String(error) } : current); }
+  }
 
   function cancelVariantClose() { if (variantCloseTimer.current) clearTimeout(variantCloseTimer.current); }
   function scheduleVariantClose() { cancelVariantClose(); variantCloseTimer.current = setTimeout(() => setActiveVariants(null), 180); }
@@ -337,6 +353,8 @@ export default function Home() {
     let published = 0;
     do {
       const data = await requestJson<ApiPayload>('/api/lark/publish', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids }) }, 'Write PriceDesk to Lark');
+      setMarketSyncError(data.marketError ?? '');
+      if (data.marketError) setNotice(`Existing Lark table synced. Market table needs attention: ${data.marketError}`);
       remaining = data.fieldsRemaining ?? 0;
       published += data.published ?? 0;
     } while (remaining > 0);
@@ -673,6 +691,7 @@ export default function Home() {
       <div className="toolbar-meta"><span>Lark: {loadError && !products.length ? 'Status unavailable' : lark.configured ? dateLabel(lark.lastSyncedAt) : 'Not connected'}</span><span>Manual (Stockholm): {dateLabel(lastManual)}</span><span title="Variants of the same MiStore product share one table row">Automatic (Beijing): {dateLabel(lastAuto, 'Asia/Shanghai')} · {autoCompletedGroups}/{groups.length} product rows · {checkedTodayIds.size}/{products.length} records checked today</span></div>
       <div className="pager"><span>{filtered.length ? `${(safePage - 1) * 50 + 1}–${Math.min(safePage * 50, filtered.length)}` : '0'} / {filtered.length}</span><button disabled={safePage <= 1} onClick={() => setPage(safePage - 1)} aria-label="Previous page">‹</button><span>{safePage} / {pageCount}</span><button disabled={safePage >= pageCount} onClick={() => setPage(safePage + 1)} aria-label="Next page">›</button></div>
       {!!Object.keys(expectedDraft).length && <div className="load-error" role="status"><span>{Object.keys(expectedDraft).length} expected prices pending server save. Retained in this browser.</span><button className="button" onClick={() => { void (async () => { for (const group of groups) for (const country of COUNTRIES) await saveExpected(group, country); })(); }}>Retry saving prices</button></div>}
+      {marketSyncError && <div className="load-error" role="alert"><span>Market quote table sync needs attention: {marketSyncError}. Existing cost table sync is retained.</span></div>}
       {loadError && <div className="load-error" role="alert"><span>{loadError}{!!products.length && ' Showing previously loaded products.'}</span><button className="button" disabled={loading} onClick={() => { setLoading(true); void loadProducts(false).catch(() => {}).finally(() => setLoading(false)); }}>Retry loading</button></div>}
     </section>
     <section className="grid-wrap" onScrollCapture={() => setActiveVariants(null)}><table className="price-grid"><colgroup><col style={{ width: 36 }}/><col style={{ width: 235 }}/>{COUNTRIES.flatMap((country) => [<col key={`${country}-own`} style={{ width: 145 }}/>, <col key={`${country}-market`} style={{ width: 145 }}/>, <col key={`${country}-second`} style={{ width: 145 }}/>, <col key={`${country}-expected`} style={{ width: 145 }}/>, <col key={`${country}-cost`} style={{ width: 145 }}/>])}<col style={{ width: 126 }}/></colgroup><thead><tr>
@@ -698,7 +717,7 @@ export default function Home() {
                 : <span className="price-link">—</span>}<small className="merchant" title={market.lowMerchant ?? ''}>{market.lowMerchant || 'Not matched'}</small></td>,
               <td key={`${country}-second`} className="price-cell" title={tooltip}>{market.secondLowPriceMinor != null && market.marketProductUrl
                 ? <a className="price-link" href={market.marketProductUrl} target="_blank" rel="noreferrer">{money(market.secondLowPriceMinor, country)}</a>
-                : <span className="price-link">—</span>}<small className="merchant" title={market.secondLowMerchant ?? ''}>{market.secondLowMerchant || 'Not available'}</small></td>,
+                : <span className="price-link">—</span>}<small className="merchant" title={market.secondLowMerchant ?? ''}>{market.secondLowMerchant || 'Not available'}</small><button className="offers-trigger" onClick={() => void showOffers(product, country)}>View offers{market.marketOffers?.length ? ` (${market.marketOffers.length})` : ''}</button></td>,
               <td key={`${country}-expected`} className="price-cell expected-cell"><input aria-label={`${country} Expected Price for product ${numbers.get(group.key)}`} value={key in expectedDraft ? expectedDraft[key] : market.expectedPriceMinor == null ? '' : String(market.expectedPriceMinor / 100)} onChange={(event) => updateExpectedDraft({ ...draftRef.current, [key]: event.target.value })} onBlur={() => void saveExpected(group, country)} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }} placeholder="—"/>{key in expectedDraft && <small className="neutral">Pending save · browser backup</small>}<small className={expectedDiff ? expectedDiff.percentage > 0 ? 'bad' : 'good' : 'neutral'}>{expectedDiff?.label ?? '—'}</small><small className={profit?.startsWith('-') ? 'bad profit-line' : profit ? 'good profit-line' : 'neutral profit-line'}>{profit ?? 'Profit unavailable'}</small></td>,
               <td key={`${country}-cost`} className="price-cell"><span className="price-link no-link">{cost.label}</span><small className="neutral">{cost.note}</small></td>];
           })}<td className="action-cell"><button className="match-button" onClick={() => openMatch(product)}>Match / Edit</button></td>
@@ -721,6 +740,13 @@ export default function Home() {
         {collectionJob.phase === 'complete' && <button className="sync-dismiss" onClick={() => setCollectionJob(null)}>Dismiss</button>}</>}
     </aside>}
     {notice && <div className="toast"><span>{notice}</span><button onClick={() => setNotice('')} aria-label="Dismiss notification">×</button></div>}
+    {offersPanel && <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setOffersPanel(null); }}><section className="modal offers-modal" role="dialog" aria-modal="true" aria-labelledby="offers-heading"><header><div><h2 id="offers-heading">{offersPanel.country} market offers</h2><p>{offersPanel.name}</p></div><button className="close" onClick={() => setOffersPanel(null)}>Close</button></header><div className="offers-content">
+      {offersPanel.url && <a href={offersPanel.url} target="_blank" rel="noreferrer">View Prisjakt comparison</a>}
+      {offersPanel.loading && <p role="status">Loading offers… You can close this panel and continue working.</p>}
+      {offersPanel.error && <p role="alert">{offersPanel.error}</p>}
+      {offersPanel.updatedAt && <p className="neutral">Updated: {dateLabel(offersPanel.updatedAt)}</p>}
+      {!!offersPanel.offers.length && <><table className="offers-table"><thead><tr><th>Rank</th><th>Merchant</th><th>Price</th><th>Currency</th><th>Source</th></tr></thead><tbody>{offersPanel.offers.map((offer,index) => <tr key={offer.merchant}><td>{index+1}</td><td>{offer.merchant}</td><td>{money(Math.round(offer.price*100),offersPanel.country)}</td><td>{offer.currency}</td><td><a href={offer.url} target="_blank" rel="noreferrer">Merchant offer</a></td></tr>)}</tbody></table>{offersPanel.offers.length < 5 && <p>Only {offersPanel.offers.length} eligible merchants were found.</p>}</>}
+    </div></section></div>}
     {collectionsOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setCollectionsOpen(false); }}><section className="modal collections-modal"><header><div><h2>Collections</h2><p>New products enter internal collections automatically. Use Match / Edit to change product collections.</p></div><button className="close" onClick={() => setCollectionsOpen(false)}>Close</button></header>
       <div className="collection-list">{[...INTERNAL_COLLECTIONS, { id: 'uncategorized', title: 'Uncategorized' }].map((category) => <div key={category.id} className="collection-item"><div><strong>{category.title}</strong><small>{categoryCounts.get(category.id) ?? 0} product rows</small></div><button className="button" onClick={() => { setCollectionFilter(`internal:${category.id}`); setPage(1); setCollectionsOpen(false); }}>View products</button></div>)}</div>
       <h3 className="collection-section-heading">MiStore collections</h3>

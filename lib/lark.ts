@@ -58,7 +58,7 @@ async function larkToken() {
   return payload.tenant_access_token;
 }
 
-async function larkRequest<T>(path: string, init?: RequestInit): Promise<T> {
+export async function larkRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const token = await larkToken();
   const response = await fetch(`https://open.larksuite.com${path}`, {
     ...init,

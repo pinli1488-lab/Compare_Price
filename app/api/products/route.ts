@@ -10,7 +10,7 @@ export const runtime = 'edge';
 
 export async function GET(request: Request) {
   const cache = (caches as CacheStorage & { default: Cache }).default;
-  const key = new Request(new URL('/api/products?dashboard-cache=v2', request.url));
+  const key = new Request(new URL('/api/products?dashboard-cache=v3', request.url));
   if (new URL(request.url).searchParams.get('fresh') !== '1' && cache) {
     try {
       const cached = await cache.match(key);
@@ -33,8 +33,9 @@ async function readProducts() {
   await ensureSchema();
   const [products, prices, variants, costs, larkStatus, publishLogs, categoryRows] = await Promise.all([
     getD1().prepare('SELECT id,sku,product_name,ean,created_at FROM products ORDER BY created_at ASC, rowid ASC').all(),
-    getD1().prepare(`SELECT p.*, l.manual_at, l.auto_at FROM product_country_prices p
-      LEFT JOIN price_refresh_log l ON l.product_id=p.product_id AND l.country=p.country`).all(),
+    getD1().prepare(`SELECT p.*, l.manual_at, l.auto_at, o.offers_json, o.market_product_id AS offers_market_product_id, o.updated_at AS offers_updated_at FROM product_country_prices p
+      LEFT JOIN price_refresh_log l ON l.product_id=p.product_id AND l.country=p.country
+      LEFT JOIN product_market_offers o ON o.product_id=p.product_id AND o.country=p.country`).all(),
     getD1().prepare('SELECT * FROM product_variants').all(),
     getD1().prepare('SELECT * FROM lark_product_costs').all(),
     getD1().prepare("SELECT last_synced_at,last_error FROM integration_status WHERE integration='lark'").first(),

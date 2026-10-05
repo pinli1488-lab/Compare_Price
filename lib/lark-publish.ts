@@ -1,3 +1,4 @@
+import { publishMarketRows } from '@/lib/lark-market';
 import { COUNTRY_CODES, type CountryCode } from '@/lib/countries';
 import { batchWritePriceDeskRecords, createPriceDeskField, isLarkConfigured, LARK_FIELDS, larkText, listPriceDeskFields, listPriceDeskRecords } from '@/lib/lark';
 import { getD1, mapProducts, type LarkCostRecord, type ProductRecord, type ProductVariant } from '@/db/store';
@@ -71,8 +72,9 @@ async function loadProducts() {
   const db = getD1();
   const [products, prices, variants, costs] = await Promise.all([
     db.prepare('SELECT id,sku,product_name,ean,created_at FROM products ORDER BY created_at ASC, rowid ASC').all(),
-    db.prepare(`SELECT p.*, l.manual_at, l.auto_at FROM product_country_prices p
-      LEFT JOIN price_refresh_log l ON l.product_id=p.product_id AND l.country=p.country`).all(),
+    db.prepare(`SELECT p.*, l.manual_at, l.auto_at, o.offers_json, o.market_product_id AS offers_market_product_id, o.updated_at AS offers_updated_at FROM product_country_prices p
+      LEFT JOIN price_refresh_log l ON l.product_id=p.product_id AND l.country=p.country
+      LEFT JOIN product_market_offers o ON o.product_id=p.product_id AND o.country=p.country`).all(),
     db.prepare('SELECT * FROM product_variants').all(),
     db.prepare('SELECT * FROM lark_product_costs').all(),
   ]);
@@ -160,11 +162,19 @@ export async function publishPriceDesk(ids: string[]) {
       for (const member of group.members) publishedProductIds.add(member.id);
     }
   }
+  let marketPublished = 0; let marketError: string | null = null; let marketFieldsRemaining = 0;
+  try {
+    const marketRows = groups.filter(group => group.members.some(member => selected.has(member.id))).flatMap(group => groupVariants(group).map(variant => ({ sku: variant.sku, name: String(fieldsForVariant(group, variant, 0, 0, 1)['PD Product Name']), ean: variant.ean, product: group.primary })));
+    const result = await publishMarketRows(marketRows);
+    marketPublished = result.marketPublished; marketFieldsRemaining = result.fieldsRemaining;
+  } catch (error) { marketError = error instanceof Error ? error.message : String(error); }
+  if (marketFieldsRemaining) return { marketPublished, marketError, fieldsCreated: 8, fieldsRemaining: marketFieldsRemaining, published: 0, createdRows: 0, duplicateSkus: [...duplicateSkus] };
   for (let offset = 0; offset < updates.length; offset += 10) await batchWritePriceDeskRecords('update', updates.slice(offset, offset + 10));
   for (let offset = 0; offset < creates.length; offset += 10) await batchWritePriceDeskRecords('create', creates.slice(offset, offset + 10));
   const now = new Date().toISOString();
+  await getD1().prepare(`INSERT INTO integration_status(integration,last_synced_at,last_error) VALUES('lark_market',?,?) ON CONFLICT(integration) DO UPDATE SET last_synced_at=CASE WHEN excluded.last_error IS NULL THEN excluded.last_synced_at ELSE integration_status.last_synced_at END,last_error=excluded.last_error`).bind(marketError || marketFieldsRemaining ? null : now, marketError).run();
   if (publishedProductIds.size) await getD1().batch([...publishedProductIds].map((id) => getD1().prepare(`INSERT INTO lark_publish_log(product_id,published_at) VALUES(?,?)
     ON CONFLICT(product_id) DO UPDATE SET published_at=excluded.published_at`).bind(id, now)));
-  return { fieldsCreated: missingFields.length, fieldsRemaining: 0, published: updates.length + creates.length,
+  return { marketPublished, marketError, fieldsCreated: missingFields.length, fieldsRemaining: marketFieldsRemaining, published: updates.length + creates.length,
     createdRows: creates.length, duplicateSkus: [...duplicateSkus] };
 }

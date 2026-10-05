@@ -105,6 +105,8 @@ jobs:
               });
               const result = await published.json().catch(() => ({}));
               if (!published.ok) throw new Error(`Lark PriceDesk publish failed: ${JSON.stringify(result)}`);
+              if (result.marketError) console.warn(`Market quote table sync needs attention: ${result.marketError}`);
+              else if (result.marketPublished) console.log(`Market quote table: synced ${result.marketPublished} SKU rows.`);
               remaining = result.fieldsRemaining ?? 0;
               if (!remaining) console.log(`Published ${result.published} SKU rows to Lark; ${result.createdRows} new rows.`);
             } while (remaining > 0);

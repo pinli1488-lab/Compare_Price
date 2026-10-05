@@ -1,3 +1,4 @@
+import { saveMarketOffers } from '@/lib/market-offers';
 import { emptyCountryPrice, ensureSchema, getD1, getProduct, mapCountryPrice, saveVariants, upsertCountryPrice } from '@/db/store';
 import { COUNTRIES, isCountryCode } from '@/lib/countries';
 import { fetchMiStoreProduct } from '@/lib/mistore';
@@ -30,6 +31,7 @@ export async function POST(request: Request) {
   const productId = productIdFromUrl(body.productId || body.productUrl || '', body.country);
   if (!productId) return Response.json({ error: 'Enter a valid Prisjakt product URL or ID' }, { status: 400 });
   const offers = await fetchOffers(productId, body.country);
+  if (offers.length) await saveMarketOffers(body.id, body.country, productId, offers);
   const low = offers[0];
   if (!low) return Response.json({ error: 'No eligible new offers found' }, { status: 422 });
   const secondLow = offers.find((offer) => offer.merchant.trim().toLowerCase() !== low.merchant.trim().toLowerCase());
