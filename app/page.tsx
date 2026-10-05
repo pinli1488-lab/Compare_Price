@@ -25,7 +25,7 @@ type Market = {
   mistorePriceMinor: number | null; marketProductId: string | null; marketProductName: string | null;
   marketProductUrl: string | null; matchStatus: string; lowPriceMinor: number | null; lowMerchant: string | null;
   secondLowPriceMinor: number | null; secondLowMerchant: string | null;
-  marketOffers?: MarketOffer[]; offersUpdatedAt?: string | null;
+  marketOffers?: MarketOffer[]; marketOffersCount?: number; offersUpdatedAt?: string | null;
   expectedPriceMinor: number | null; updatedAt: string | null; manualRefreshedAt: string | null; autoRefreshedAt: string | null;
 };
 type Product = { id: string; sku: string; productName: string; ean: string; createdAt: string; markets: Record<Country, Market>; variants: Record<Country, Variant[]>; larkCosts: Record<string, LarkCost>; internalCategory: InternalCollectionId | null; internalCategoryOverride: CollectionOverride };
@@ -259,7 +259,7 @@ export default function Home() {
       const result = await response.json() as { offers?: MarketOffer[]; updatedAt?: string; error?: string };
       if (!response.ok || !result.offers) throw new Error(result.error || 'Could not load market offers.');
       setOffersPanel(current => current?.id === product.id && current.country === country ? { ...current, offers: result.offers!, updatedAt: result.updatedAt ?? null, loading: false } : current);
-      setProducts(current => current.map(item => item.id === product.id ? { ...item, markets: { ...item.markets, [country]: { ...item.markets[country], marketOffers: result.offers, offersUpdatedAt: result.updatedAt, lowPriceMinor: result.offers![0] ? Math.round(result.offers![0].price*100) : item.markets[country].lowPriceMinor, lowMerchant: result.offers![0]?.merchant ?? item.markets[country].lowMerchant, secondLowPriceMinor: result.offers![1] ? Math.round(result.offers![1].price*100) : null, secondLowMerchant: result.offers![1]?.merchant ?? null } } } : item));
+      setProducts(current => current.map(item => item.id === product.id ? { ...item, markets: { ...item.markets, [country]: { ...item.markets[country], marketOffers: result.offers, marketOffersCount: result.offers?.length, offersUpdatedAt: result.updatedAt, lowPriceMinor: result.offers![0] ? Math.round(result.offers![0].price*100) : item.markets[country].lowPriceMinor, lowMerchant: result.offers![0]?.merchant ?? item.markets[country].lowMerchant, secondLowPriceMinor: result.offers![1] ? Math.round(result.offers![1].price*100) : null, secondLowMerchant: result.offers![1]?.merchant ?? null } } } : item));
     } catch (error) { setOffersPanel(current => current?.id === product.id && current.country === country ? { ...current, loading: false, error: error instanceof Error ? error.message : String(error) } : current); }
   }
 
@@ -717,7 +717,7 @@ export default function Home() {
                 : <span className="price-link">—</span>}<small className="merchant" title={market.lowMerchant ?? ''}>{market.lowMerchant || 'Not matched'}</small></td>,
               <td key={`${country}-second`} className="price-cell" title={tooltip}>{market.secondLowPriceMinor != null && market.marketProductUrl
                 ? <a className="price-link" href={market.marketProductUrl} target="_blank" rel="noreferrer">{money(market.secondLowPriceMinor, country)}</a>
-                : <span className="price-link">—</span>}<small className="merchant" title={market.secondLowMerchant ?? ''}>{market.secondLowMerchant || 'Not available'}</small><button className="offers-trigger" onClick={() => void showOffers(product, country)}>View offers{market.marketOffers?.length ? ` (${market.marketOffers.length})` : ''}</button></td>,
+                : <span className="price-link">—</span>}<small className="merchant" title={market.secondLowMerchant ?? ''}>{market.secondLowMerchant || 'Not available'}</small><button className="offers-trigger" onClick={() => void showOffers(product, country)}>View offers{(market.marketOffersCount ?? market.marketOffers?.length) ? ` (${market.marketOffersCount ?? market.marketOffers?.length})` : ''}</button></td>,
               <td key={`${country}-expected`} className="price-cell expected-cell"><input aria-label={`${country} Expected Price for product ${numbers.get(group.key)}`} value={key in expectedDraft ? expectedDraft[key] : market.expectedPriceMinor == null ? '' : String(market.expectedPriceMinor / 100)} onChange={(event) => updateExpectedDraft({ ...draftRef.current, [key]: event.target.value })} onBlur={() => void saveExpected(group, country)} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }} placeholder="—"/>{key in expectedDraft && <small className="neutral">Pending save · browser backup</small>}<small className={expectedDiff ? expectedDiff.percentage > 0 ? 'bad' : 'good' : 'neutral'}>{expectedDiff?.label ?? '—'}</small><small className={profit?.startsWith('-') ? 'bad profit-line' : profit ? 'good profit-line' : 'neutral profit-line'}>{profit ?? 'Profit unavailable'}</small></td>,
               <td key={`${country}-cost`} className="price-cell"><span className="price-link no-link">{cost.label}</span><small className="neutral">{cost.note}</small></td>];
           })}<td className="action-cell"><button className="match-button" onClick={() => openMatch(product)}>Match / Edit</button></td>

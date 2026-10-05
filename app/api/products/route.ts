@@ -48,7 +48,10 @@ async function readProducts() {
     products: mapProducts(products.results as Record<string, unknown>[], prices.results as Record<string, unknown>[], variants.results as Record<string, unknown>[], costs.results as Record<string, unknown>[])
       .map((product) => {
         const override = categories.get(product.id) ?? null;
-        return { ...product, larkPublishedAt: published.get(product.id) ?? null,
+        return { ...product,
+          // Keep the dashboard/browser backup compact; full quotes load on demand.
+          markets: Object.fromEntries(Object.entries(product.markets).map(([country, market]) => [country, { ...market, marketOffersCount: market.marketOffers?.length ?? 0, marketOffers: undefined }])),
+          larkPublishedAt: published.get(product.id) ?? null,
           internalCategoryOverride: override,
           internalCategory: override === 'uncategorized' ? null : override ?? classifyInternalCollection(productDisplayName(product)) };
       }),
