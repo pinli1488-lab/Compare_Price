@@ -142,10 +142,10 @@ export async function publishMarketPriceDesk(ids: string[], hydrate = false) {
   if (hydrate) {
     const groups = groupProducts(products).filter(group => group.members.some(member => selected.has(member.id)));
     const jobs = new Map<string, { id: string; country: CountryCode; productId: string }>();
-    for (const group of groups) for (const country of COUNTRY_CODES) {
-      const market = marketProductForVariant(group, group.primary.sku).markets[country];
+    for (const group of groups) for (const member of group.members) for (const country of COUNTRY_CODES) {
+      const market = marketProductForVariant(group, member.sku).markets[country];
       if (!market.marketProductId || market.marketOffers?.length) continue;
-      jobs.set(country + ':' + market.marketProductId, { id: group.members.find(member => member.markets[country].marketProductId === market.marketProductId)!.id, country, productId: market.marketProductId });
+      jobs.set(country + ':' + market.marketProductId, { id: group.members.find(candidate => candidate.markets[country].marketProductId === market.marketProductId)!.id, country, productId: market.marketProductId });
     }
     // Limit each backfill request, independently of the normal 12h price refresh.
     const pending = [...jobs.values()].slice(0, 8);
