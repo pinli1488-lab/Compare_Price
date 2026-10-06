@@ -120,6 +120,17 @@ function fieldsForVariant(group: Group, variant: Variant, groupIndex: number, va
   return fields;
 }
 
+export async function publishMarketPriceDesk(ids: string[]) {
+  const products = await loadProducts(); const selected = new Set(ids);
+  const rows = groupProducts(products).filter(group => group.members.some(member => selected.has(member.id)))
+    .flatMap(group => groupVariants(group).map(variant => ({ sku: variant.sku,
+      name: String(fieldsForVariant(group, variant, 0, 0, 1)['PD Product Name']), ean: variant.ean, product: group.primary })));
+  const result = await publishMarketRows(rows);
+  if (!result.fieldsRemaining) await getD1().prepare(`INSERT INTO integration_status(integration,last_synced_at,last_error) VALUES('lark_market',?,NULL)
+    ON CONFLICT(integration) DO UPDATE SET last_synced_at=excluded.last_synced_at,last_error=NULL`).bind(new Date().toISOString()).run();
+  return result;
+}
+
 export async function publishPriceDesk(ids: string[]) {
   if (!isLarkConfigured()) throw new Error('Lark is not connected');
   const existingFields = await listPriceDeskFields();

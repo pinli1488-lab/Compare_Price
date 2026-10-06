@@ -34,12 +34,46 @@ export async function resolveMarketTarget(): Promise<Target> {
 async function listAll<T>(path: string) {
   const items: T[] = []; let pageToken = '';
   do {
-    const query = new URLSearchParams({ page_size: '100' });
+    const query = new URLSearchParams({ page_size: path.endsWith('/records') ? '500' : '100' });
     if (pageToken) query.set('page_token', pageToken);
     const result = await larkRequest<{ items?: T[]; has_more?: boolean; page_token?: string }>(`${path}?${query}`);
     items.push(...(result.items ?? [])); pageToken = result.has_more ? result.page_token ?? '' : '';
   } while (pageToken);
   return items;
+}
+
+export async function auditMarketTable() {
+  const target = await resolveMarketTarget();
+  const path = `/open-apis/bitable/v1/apps/${target.baseToken}/tables/${target.tableId}`;
+  const fields = await listAll<LarkField & { is_primary?: boolean }>(`${path}/fields`);
+  const rows = await listAll<{ fields: Record<string, unknown> }>(`${path}/records`);
+  const skus = rows.map(row => larkText(row.fields.SKU)).filter(Boolean);
+  const seen = new Set<string>(); const duplicates = new Set<string>();
+  for (const sku of skus) { const key = sku.trim().toLowerCase(); if (seen.has(key)) duplicates.add(sku); seen.add(key); }
+  const quoteIntegrityErrors: string[] = [];
+  for (const row of rows) {
+    const sku = larkText(row.fields.SKU); if (!sku) continue;
+    try {
+      const json = JSON.parse(larkText(row.fields['PD Market Offers JSON']));
+      if (json.sku !== sku) quoteIntegrityErrors.push(`${sku}: JSON SKU mismatch`);
+      for (const country of COUNTRY_CODES) for (let index = 0; index < 5; index++) {
+        const offer = json.countries?.[country]?.offers?.[index]; const prefix = `PD ${country} #${index + 1}`;
+        const rawPrice = row.fields[`${prefix} Price`];
+        const price = rawPrice == null ? null : Number(rawPrice);
+        if (price !== (offer?.price ?? null) || larkText(row.fields[`${prefix} Merchant`]) !== (offer?.merchant ?? '') ||
+          larkText(row.fields[`${prefix} Currency`]) !== (offer?.currency ?? '') || larkText(row.fields[`${prefix} URL`]) !== (offer?.url ?? '')) {
+          quoteIntegrityErrors.push(`${sku}: ${country} rank ${index + 1} mismatch`);
+        }
+      }
+    } catch { quoteIntegrityErrors.push(`${sku}: invalid offers JSON`); }
+  }
+  return { fields, totalRows: rows.length, skuRows: skus.length, skus, duplicateSkus: [...duplicates],
+    quoteIntegrityErrors,
+    missingNames: rows.filter(row => larkText(row.fields.SKU) && !larkText(row.fields['PD Product Name'])).length,
+    countries: Object.fromEntries(COUNTRY_CODES.map(country => [country, {
+      lowestPrices: rows.filter(row => row.fields[`PD ${country} #1 Price`] != null).length,
+      fifthPrices: rows.filter(row => row.fields[`PD ${country} #5 Price`] != null).length,
+    }])) };
 }
 
 export function marketFieldsForRow(row: Row) {
@@ -69,7 +103,18 @@ export function marketFieldsForRow(row: Row) {
 export async function publishMarketRows(rows: Row[]) {
   const target = await resolveMarketTarget();
   const path = `/open-apis/bitable/v1/apps/${target.baseToken}/tables/${target.tableId}`;
-  const existing = await listAll<LarkField>(`${path}/fields`);
+  let existing = await listAll<LarkField & { is_primary?: boolean }>(`${path}/fields`);
+  const primary = existing.find(field => field.is_primary);
+  const skuField = existing.find(field => field.field_name === 'SKU');
+  // Reuse the new table's empty primary column for SKU, so SKU is the first column.
+  if (primary?.field_name === '文本' && primary.type === 1) {
+    const rows = await listAll<{ fields: Record<string, unknown> }>(`${path}/records`);
+    if (rows.every(row => !larkText(row.fields['文本']) && !larkText(row.fields.SKU))) {
+      if (skuField) await larkRequest(`${path}/fields/${skuField.field_id}`, { method: 'DELETE' });
+      await larkRequest(`${path}/fields/${primary.field_id}`, { method: 'PUT', body: JSON.stringify({ field_name: 'SKU', type: 1 }) });
+      existing = await listAll<LarkField & { is_primary?: boolean }>(`${path}/fields`);
+    }
+  }
   const types = new Map(existing.map(field => [field.field_name, field.type]));
   for (const field of MARKET_FIELDS) if (types.has(field.name) && types.get(field.name) !== field.type) throw new Error(`Market table field type conflict: ${field.name}`);
   const missing = MARKET_FIELDS.filter(field => !types.has(field.name));
@@ -77,6 +122,7 @@ export async function publishMarketRows(rows: Row[]) {
   if (missing.length > 8) return { marketPublished: 0, fieldsRemaining: missing.length - 8 };
   const existingRows = await listAll<{ record_id: string; fields: Record<string, unknown> }>(`${path}/records`);
   const bySku = new Map<string, string[]>();
+  const blankRows = existingRows.filter(row => Object.values(row.fields).every(value => value == null || value === '' || (Array.isArray(value) && !value.length))).map(row => row.record_id);
   for (const row of existingRows) {
     const sku = larkText(row.fields.SKU).toLowerCase();
     if (sku) bySku.set(sku, [...(bySku.get(sku) ?? []), row.record_id]);
@@ -87,7 +133,8 @@ export async function publishMarketRows(rows: Row[]) {
     const ids = bySku.get(sku) ?? []; const fields = marketFieldsForRow(row);
     // Duplicate target SKUs are ambiguous: preserve their rows and surface the issue.
     if (ids.length > 1) throw new Error(`Duplicate SKU ${row.sku} in market table. Resolve duplicate rows before syncing.`);
-    if (ids.length) updates.push({ record_id: ids[0], fields }); else creates.push({ fields });
+    const recordId = ids[0] ?? blankRows.shift();
+    if (recordId) updates.push({ record_id: recordId, fields }); else creates.push({ fields });
   }
   for (const [kind, records] of [['batch_create', creates], ['batch_update', updates]] as const) {
     for (let index = 0; index < records.length; index += 10) await larkRequest(`${path}/records/${kind}`, { method: 'POST', body: JSON.stringify({ records: records.slice(index, index + 10) }) });
