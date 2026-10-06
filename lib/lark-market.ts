@@ -42,7 +42,7 @@ async function listAll<T>(path: string) {
   return items;
 }
 
-export async function auditMarketTable() {
+export async function auditMarketTable(sku?: string) {
   const target = await resolveMarketTarget();
   const path = `/open-apis/bitable/v1/apps/${target.baseToken}/tables/${target.tableId}`;
   const fields = await listAll<LarkField & { is_primary?: boolean }>(`${path}/fields`);
@@ -67,7 +67,7 @@ export async function auditMarketTable() {
       }
     } catch { quoteIntegrityErrors.push(`${sku}: invalid offers JSON`); }
   }
-  return { fields, totalRows: rows.length, skuRows: skus.length, skus, duplicateSkus: [...duplicates],
+  return { ...(sku ? { matchingRows: rows.filter(row => larkText(row.fields.SKU) === sku) } : {}), fields, totalRows: rows.length, skuRows: skus.length, skus, duplicateSkus: [...duplicates],
     quoteIntegrityErrors,
     missingNames: rows.filter(row => larkText(row.fields.SKU) && !larkText(row.fields['PD Product Name'])).length,
     countries: Object.fromEntries(COUNTRY_CODES.map(country => [country, {

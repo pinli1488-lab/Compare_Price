@@ -5,7 +5,7 @@ export const runtime = 'edge';
 export async function GET(request: Request) {
   await ensureSchema();
   if (new URL(request.url).searchParams.get('audit') === '1') {
-    try { return Response.json(await auditMarketTable()); }
+    try { return Response.json(await auditMarketTable(new URL(request.url).searchParams.get('sku') ?? undefined)); }
     catch(error) { return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 502 }); }
   }
   const target = await getD1().prepare('SELECT base_token,table_id FROM market_lark_target WHERE id=1').first();
@@ -15,10 +15,10 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     await ensureSchema();
-    const body = await request.json().catch(() => ({})) as { ids?: unknown };
+    const body = await request.json().catch(() => ({})) as { ids?: unknown; hydrate?: boolean };
     if (body.ids !== undefined) {
       if (!Array.isArray(body.ids) || body.ids.length > 8 || body.ids.some(id => typeof id !== 'string')) return Response.json({ error: 'Provide at most eight product IDs.' }, { status: 400 });
-      return Response.json(await publishMarketPriceDesk(body.ids));
+      return Response.json(await publishMarketPriceDesk(body.ids, body.hydrate === true));
     }
     return Response.json({ connected: true, target: await resolveMarketTarget() });
   }

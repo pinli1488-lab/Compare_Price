@@ -1,3 +1,5 @@
+import { fetchOffers, shouldExcludeMerchant, type MarketOffer } from '@/lib/prisjakt';
+import { saveMarketOffers } from '@/lib/market-offers';
 import { publishMarketRows } from '@/lib/lark-market';
 import { COUNTRY_CODES, type CountryCode } from '@/lib/countries';
 import { batchWritePriceDeskRecords, createPriceDeskField, isLarkConfigured, LARK_FIELDS, larkText, listPriceDeskFields, listPriceDeskRecords } from '@/lib/lark';
@@ -68,6 +70,20 @@ function groupVariants(group: Group) {
   return [...variants.values()];
 }
 
+// Preserve a SKU's explicit match; share quotes only for the same Prisjakt product.
+function marketProductForVariant(group: Group, sku: string): ProductRecord {
+  const owner = group.members.find(member => key(member.sku) === key(sku)) ?? group.primary;
+  const markets = { ...owner.markets };
+  for (const country of COUNTRY_CODES) {
+    const base = owner.markets[country].marketProductId ? owner.markets[country] : group.primary.markets[country];
+    const candidates = group.members.map(member => member.markets[country]).filter(market =>
+      base.marketProductId && market.marketProductId === base.marketProductId && market.marketOffers?.length);
+    candidates.sort((a, b) => Date.parse(b.offersUpdatedAt ?? '') - Date.parse(a.offersUpdatedAt ?? ''));
+    markets[country] = candidates[0] ?? base;
+  }
+  return { ...owner, markets };
+}
+
 async function loadProducts() {
   const db = getD1();
   const [products, prices, variants, costs] = await Promise.all([
@@ -120,15 +136,37 @@ function fieldsForVariant(group: Group, variant: Variant, groupIndex: number, va
   return fields;
 }
 
-export async function publishMarketPriceDesk(ids: string[]) {
-  const products = await loadProducts(); const selected = new Set(ids);
+export async function publishMarketPriceDesk(ids: string[], hydrate = false) {
+  let products = await loadProducts(); const selected = new Set(ids);
+  const hydrationErrors: string[] = [];
+  if (hydrate) {
+    const groups = groupProducts(products).filter(group => group.members.some(member => selected.has(member.id)));
+    const jobs = new Map<string, { id: string; country: CountryCode; productId: string }>();
+    for (const group of groups) for (const country of COUNTRY_CODES) {
+      const market = marketProductForVariant(group, group.primary.sku).markets[country];
+      if (!market.marketProductId || market.marketOffers?.length) continue;
+      jobs.set(country + ':' + market.marketProductId, { id: group.members.find(member => member.markets[country].marketProductId === market.marketProductId)!.id, country, productId: market.marketProductId });
+    }
+    // Limit each backfill request, independently of the normal 12h price refresh.
+    const pending = [...jobs.values()].slice(0, 8);
+    for (let offset = 0; offset < pending.length; offset += 2) await Promise.all(pending.slice(offset, offset + 2).map(async job => {
+      try {
+        const cached = await getD1().prepare('SELECT offers_json,updated_at FROM product_market_offers WHERE country=? AND market_product_id=? ORDER BY updated_at DESC LIMIT 1').bind(job.country, job.productId).first();
+        const recent = cached && Date.now() - Date.parse(String(cached.updated_at)) < 12 * 60 * 60 * 1000;
+        const offers = recent ? (JSON.parse(String(cached.offers_json)) as MarketOffer[]).filter(offer => !shouldExcludeMerchant(offer.merchant)) : await fetchOffers(job.productId, job.country);
+        if (!offers.length) throw new Error('No eligible offers returned');
+        await saveMarketOffers(job.id, job.country, job.productId, offers, recent ? String(cached.updated_at) : undefined);
+      } catch (error) { hydrationErrors.push(job.id + ':' + job.country + ': ' + String(error)); }
+    }));
+    products = await loadProducts();
+  }
   const rows = groupProducts(products).filter(group => group.members.some(member => selected.has(member.id)))
     .flatMap(group => groupVariants(group).map(variant => ({ sku: variant.sku,
-      name: String(fieldsForVariant(group, variant, 0, 0, 1)['PD Product Name']), ean: variant.ean, product: group.primary })));
+      name: String(fieldsForVariant(group, variant, 0, 0, 1)['PD Product Name']), ean: variant.ean, product: marketProductForVariant(group, variant.sku) })));
   const result = await publishMarketRows(rows);
   if (!result.fieldsRemaining) await getD1().prepare(`INSERT INTO integration_status(integration,last_synced_at,last_error) VALUES('lark_market',?,NULL)
     ON CONFLICT(integration) DO UPDATE SET last_synced_at=excluded.last_synced_at,last_error=NULL`).bind(new Date().toISOString()).run();
-  return result;
+  return { ...result, hydrationErrors };
 }
 
 export async function publishPriceDesk(ids: string[]) {
@@ -175,7 +213,7 @@ export async function publishPriceDesk(ids: string[]) {
   }
   let marketPublished = 0; let marketError: string | null = null; let marketFieldsRemaining = 0;
   try {
-    const marketRows = groups.filter(group => group.members.some(member => selected.has(member.id))).flatMap(group => groupVariants(group).map(variant => ({ sku: variant.sku, name: String(fieldsForVariant(group, variant, 0, 0, 1)['PD Product Name']), ean: variant.ean, product: group.primary })));
+    const marketRows = groups.filter(group => group.members.some(member => selected.has(member.id))).flatMap(group => groupVariants(group).map(variant => ({ sku: variant.sku, name: String(fieldsForVariant(group, variant, 0, 0, 1)['PD Product Name']), ean: variant.ean, product: marketProductForVariant(group, variant.sku) })));
     const result = await publishMarketRows(marketRows);
     marketPublished = result.marketPublished; marketFieldsRemaining = result.fieldsRemaining;
   } catch (error) { marketError = error instanceof Error ? error.message : String(error); }
@@ -184,7 +222,7 @@ export async function publishPriceDesk(ids: string[]) {
   for (let offset = 0; offset < creates.length; offset += 10) await batchWritePriceDeskRecords('create', creates.slice(offset, offset + 10));
   const now = new Date().toISOString();
   await getD1().prepare(`INSERT INTO integration_status(integration,last_synced_at,last_error) VALUES('lark_market',?,?) ON CONFLICT(integration) DO UPDATE SET last_synced_at=CASE WHEN excluded.last_error IS NULL THEN excluded.last_synced_at ELSE integration_status.last_synced_at END,last_error=excluded.last_error`).bind(marketError || marketFieldsRemaining ? null : now, marketError).run();
-  if (publishedProductIds.size) await getD1().batch([...publishedProductIds].map((id) => getD1().prepare(`INSERT INTO lark_publish_log(product_id,published_at) VALUES(?,?)
+  if (!marketError && !marketFieldsRemaining && publishedProductIds.size) await getD1().batch([...publishedProductIds].map((id) => getD1().prepare(`INSERT INTO lark_publish_log(product_id,published_at) VALUES(?,?)
     ON CONFLICT(product_id) DO UPDATE SET published_at=excluded.published_at`).bind(id, now)));
   return { marketPublished, marketError, fieldsCreated: missingFields.length, fieldsRemaining: marketFieldsRemaining, published: updates.length + creates.length,
     createdRows: creates.length, duplicateSkus: [...duplicateSkus] };
