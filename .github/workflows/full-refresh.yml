@@ -1,0 +1,16 @@
+name: Full PriceDesk refresh and Lark sync
+on:
+  workflow_dispatch:
+concurrency:
+  group: pricedesk-daily-refresh
+  cancel-in-progress: false
+jobs:
+  refresh-all:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refresh all countries and write both Lark tables in batches
+        env:
+          PRICE_DESK_URL: ${{ vars.PRICE_DESK_URL }}
+        run: node scripts/full-refresh.mjs
