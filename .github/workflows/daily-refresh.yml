@@ -28,21 +28,35 @@ jobs:
           const beijingDay = (value) => new Intl.DateTimeFormat('en-CA', {
             timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
           }).format(new Date(value));
+          async function request(url, options = {}) {
+            let lastError;
+            for (let attempt = 0; attempt < 3; attempt++) {
+              try {
+                const response = await fetch(url, { ...options, signal: AbortSignal.timeout(120000) });
+                if (![429, 500, 502, 503, 504].includes(response.status) || attempt === 2) return response;
+                await response.arrayBuffer();
+                lastError = new Error(`HTTP ${response.status}`);
+              } catch (error) { lastError = error; }
+              if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1)));
+            }
+            throw lastError;
+          }
           const today = beijingDay(Date.now());
           const countries = ['SE', 'DK', 'FI', 'NO'];
           const staleCountries = (product) => countries.filter((country) => {
             const refreshedAt = product.markets?.[country]?.autoRefreshedAt;
             return !refreshedAt || beijingDay(refreshedAt) !== today;
           });
-          const needsPublish = (product) => !product.larkPublishedAt || beijingDay(product.larkPublishedAt) !== today;
-          const initial = await fetch(`${base}/api/products`);
+          const needsPublish = (product) => !product.larkPublishedAt || beijingDay(product.larkPublishedAt) !== today ||
+            countries.some(country => Date.parse(product.markets?.[country]?.offersUpdatedAt ?? product.markets?.[country]?.updatedAt ?? '') > Date.parse(product.larkPublishedAt));
+          const initial = await request(`${base}/api/products?fresh=1`);
           if (!initial.ok) throw new Error(`Product list failed: ${initial.status}`);
           const initialPayload = await initial.json();
           if (beijingDay(initialPayload.lark?.lastSyncedAt ?? 0) !== today) {
-            const lark = await fetch(`${base}/api/lark/sync`, { method: 'POST' });
+            const lark = await request(`${base}/api/lark/sync`, { method: 'POST' });
             if (!lark.ok) console.warn(`Lark cost sync skipped: ${lark.status} ${await lark.text()}`);
           }
-          const selected = await fetch(`${base}/api/collections`);
+          const selected = await request(`${base}/api/collections`);
           if (!selected.ok) throw new Error(`Collection list failed: ${selected.status}`);
           const { collections = [] } = await selected.json();
           if ((initialPayload.products ?? []).length &&
@@ -55,14 +69,14 @@ jobs:
           }
           for (const collection of collections) {
             if (beijingDay(collection.updatedAt) === today) continue;
-            const response = await fetch(`${base}/api/collections`, {
+            const response = await request(`${base}/api/collections`, {
               method: 'POST', headers: { 'content-type': 'application/json' },
               body: JSON.stringify({ handle: collection.handle }),
             });
             if (!response.ok) { console.error(`Collection ${collection.handle} failed: ${await response.text()}`); continue; }
             const { collection: current } = await response.json();
             for (let offset = 0; offset < current.productHandles.length; offset += 8) {
-              const imported = await fetch(`${base}/api/collections/import`, {
+              const imported = await request(`${base}/api/collections/import`, {
                 method: 'POST', headers: { 'content-type': 'application/json' },
                 body: JSON.stringify({ handle: current.handle, offset }),
               });
@@ -70,7 +84,7 @@ jobs:
               if (!imported.ok || result.failedHandles?.length) console.error(`Collection ${current.handle} batch ${offset} needs review: ${JSON.stringify(result)}`);
             }
           }
-          const response = await fetch(`${base}/api/products`);
+          const response = await request(`${base}/api/products?fresh=1`);
           if (!response.ok) throw new Error(`Product list failed: ${response.status}`);
           const { products = [] } = await response.json();
           const beijingTime = new Intl.DateTimeFormat('en-GB', {
@@ -86,12 +100,17 @@ jobs:
             if (missing.length || needsPublish(product)) pending.push({ product, missing });
           }
           for (const [index, { product, missing }] of pending.entries()) {
-            const results = await Promise.all(missing.map((country) => fetch(`${base}/api/refresh`, {
+            const results = await Promise.allSettled(missing.map((country) => request(`${base}/api/refresh`, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
                 body: JSON.stringify({ ids: [product.id], country, source: 'auto' }),
               })));
-            for (const [countryIndex, refresh] of results.entries()) {
+            for (const [countryIndex, result] of results.entries()) {
+              if (result.status === 'rejected') {
+                console.error(`Product ${index + 1} ${missing[countryIndex]} connection failed: ${result.reason}`);
+                continue;
+              }
+              const refresh = result.value;
               const payload = await refresh.json().catch(() => ({}));
               if (!refresh.ok || payload.errors?.length) console.error(`Product ${index + 1} ${missing[countryIndex]} failed: ${JSON.stringify(payload.errors ?? refresh.status)}`);
             }
@@ -99,13 +118,13 @@ jobs:
           if (pending.length) {
             let remaining = 0;
             do {
-              const published = await fetch(`${base}/api/lark/publish`, {
+              const published = await request(`${base}/api/lark/publish`, {
                 method: 'POST', headers: { 'content-type': 'application/json' },
                 body: JSON.stringify({ ids: pending.map(({ product }) => product.id) }),
               });
               const result = await published.json().catch(() => ({}));
               if (!published.ok) throw new Error(`Lark PriceDesk publish failed: ${JSON.stringify(result)}`);
-              if (result.marketError) console.warn(`Market quote table sync needs attention: ${result.marketError}`);
+              if (result.marketError) throw new Error(`Market quote table sync failed; retry on the next batch: ${result.marketError}`);
               else if (result.marketPublished) console.log(`Market quote table: synced ${result.marketPublished} SKU rows.`);
               remaining = result.fieldsRemaining ?? 0;
               if (!remaining) console.log(`Published ${result.published} SKU rows to Lark; ${result.createdRows} new rows.`);
